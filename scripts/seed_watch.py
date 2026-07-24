@@ -37,6 +37,16 @@ REGIOES: dict[str, list[str]] = {
     "asia": ["DXB", "DOH", "IST", "NRT", "ICN", "BKK", "SIN"],
 }
 
+# kgmid (Google Knowledge Graph) por região, para a busca ampla via SerpApi
+# Explore (arrival_area_id). ATENÇÃO: valores de exemplo — confirme o kgmid
+# exato de cada região/país antes de confiar (busque o termo na SerpApi
+# Google Knowledge Graph API ou no Google e copie o "kgmid" do resultado).
+# Sem um kgmid confirmado, deixe em branco: o watch funciona normalmente
+# com a lista curada acima, só não roda o Explore diário.
+ARRIVAL_AREA_ID: dict[str, str] = {
+    "europa": "/m/02j9z",
+}
+
 
 def cmd_rota(args) -> None:
     watch = Watch(
@@ -55,6 +65,7 @@ def cmd_rota(args) -> None:
 def cmd_regiao(args) -> None:
     if args.regiao not in REGIOES:
         raise SystemExit(f"Região desconhecida. Opções: {', '.join(REGIOES)}")
+    area_id = ARRIVAL_AREA_ID.get(args.regiao)
     watch = Watch(
         nome=f"{args.origem.upper()} -> {args.regiao} "
              f"{args.data_ini.strftime('%d/%m')}-{args.data_fim.strftime('%d/%m/%Y')}",
@@ -62,10 +73,15 @@ def cmd_regiao(args) -> None:
         origem_iata=args.origem.upper(),
         destino_iata=None,
         regiao_destinos=json.dumps(REGIOES[args.regiao]),
+        arrival_area_id=area_id,
         data_ini=args.data_ini,
         data_fim=args.data_fim,
         preco_limite=args.limite,
     )
+    if not area_id:
+        print(f"Aviso: sem kgmid cadastrado para '{args.regiao}' — "
+              "busca ampla via SerpApi Explore fica desativada para este watch "
+              "(a lista curada de destinos continua funcionando normalmente).")
     _salvar(watch)
 
 

@@ -19,3 +19,27 @@ def init_db() -> None:
     from farewatch import models  # noqa: F401 — registra os mapeamentos
 
     models.Base.metadata.create_all(engine)
+    _migrar_sqlite()
+
+
+def _migrar_sqlite() -> None:
+    """Micro-migração: adiciona colunas novas em bancos SQLite já criados.
+
+    create_all não altera tabelas existentes; para um projeto pessoal isto
+    substitui o Alembic. Adicionar aqui cada coluna nova de versões futuras.
+    """
+    if not settings.sqlalchemy_url.startswith("sqlite"):
+        return
+    from sqlalchemy import text
+
+    colunas_novas = {
+        "watch": [("arrival_area_id", "VARCHAR(40)")],
+    }
+    with engine.begin() as conn:
+        for tabela, colunas in colunas_novas.items():
+            existentes = {
+                linha[1] for linha in conn.execute(text(f"PRAGMA table_info({tabela})"))
+            }
+            for nome, tipo in colunas:
+                if nome not in existentes:
+                    conn.execute(text(f"ALTER TABLE {tabela} ADD COLUMN {nome} {tipo}"))

@@ -62,6 +62,7 @@ class Watch(Base):
     origem_iata: Mapped[str] = mapped_column(String(3))
     destino_iata: Mapped[str | None] = mapped_column(String(3))       # NULL quando tipo=REGIAO
     regiao_destinos: Mapped[str | None] = mapped_column(Text)         # JSON: ["LIS","MAD",...] p/ REGIAO
+    arrival_area_id: Mapped[str | None] = mapped_column(String(40))   # kgmid Google Explore (ex.: /m/02j9z = Europa)
     data_ini: Mapped[date]                                            # janela de embarque
     data_fim: Mapped[date]
     ida_volta: Mapped[bool] = mapped_column(Boolean, default=True)
