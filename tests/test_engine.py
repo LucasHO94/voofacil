@@ -114,7 +114,7 @@ def test_executar_varredura_persiste_por_watch(session):
     resultado = executar_varredura(session, providers=[provider])
     session.commit()
 
-    assert resultado == {w1.id: 2, w2.id: 2}
+    assert resultado.snapshots_por_watch == {w1.id: 2, w2.id: 2}
     assert provider.chamadas == 2
     assert session.query(PriceSnapshot).count() == 4
 
@@ -125,7 +125,7 @@ def test_executar_varredura_ignora_watch_inativo(session):
 
     resultado = executar_varredura(session, providers=[provider])
 
-    assert resultado == {}
+    assert resultado.snapshots_por_watch == {}
     assert provider.chamadas == 0
 
 
@@ -136,4 +136,18 @@ def test_provider_quebrado_nao_derruba_varredura(session):
     resultado = executar_varredura(session, providers=[ExplodingProvider(), bom])
     session.commit()
 
-    assert resultado == {w.id: 1}
+    assert resultado.snapshots_por_watch == {w.id: 1}
+
+
+def test_varredura_gera_candidato_abaixo_do_limite(session):
+    w = _watch(session, preco_limite=Decimal("3000"))
+    provider = FakeProvider([_quote("2890")])
+
+    resultado = executar_varredura(session, providers=[provider])
+    session.commit()
+
+    assert len(resultado.candidatos) == 1
+    cand = resultado.candidatos[0]
+    assert cand.watch_id == w.id
+    assert cand.gatilho == "LIMITE"
+    assert cand.quote.preco == Decimal("2890")

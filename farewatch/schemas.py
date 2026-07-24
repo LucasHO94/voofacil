@@ -28,6 +28,7 @@ class Candidato(BaseModel):
 
     quote: PriceQuote
     watch_id: int
+    snapshot_id: int
     gatilho: str                    # LIMITE | NOVO_MINIMO | PERCENTIL | ERROR_FARE
     baseline_min: Decimal | None = None   # contexto p/ mensagem ("menor preço até hoje: R$X")
     confirmado_ao_vivo: bool = False

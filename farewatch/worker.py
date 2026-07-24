@@ -12,14 +12,18 @@ from __future__ import annotations
 
 import argparse
 import logging
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 
+from farewatch.alerts.dispatcher import canais_padrao, despachar
 from farewatch.db import SessionLocal, init_db
+from farewatch.engine.detector import avaliar_snapshot
 from farewatch.engine.store import persistir_quotes
 from farewatch.models import Watch
 from farewatch.providers.base import Provider
 from farewatch.providers.travelpayouts import TravelpayoutsProvider
+from farewatch.schemas import Candidato
 
 log = logging.getLogger("farewatch.worker")
 
@@ -28,12 +32,18 @@ HORARIOS_VARREDURA = ["06:00", "12:30", "21:00"]
 JITTER_SEGUNDOS = 900  # +/- 15 min para não bater sempre no mesmo horário
 
 
-def executar_varredura(session, providers: list[Provider]) -> dict[int, int]:
-    """Varre todos os watches ativos com cada provider e persiste os snapshots.
+@dataclass
+class ResultadoVarredura:
+    snapshots_por_watch: dict[int, int] = field(default_factory=dict)
+    candidatos: list[Candidato] = field(default_factory=list)
 
-    Retorna {watch_id: qtde de snapshots novos}. Commit fica a cargo do chamador.
+
+def executar_varredura(session, providers: list[Provider]) -> ResultadoVarredura:
+    """Varre os watches ativos, persiste snapshots e avalia gatilhos de alerta.
+
+    Commit fica a cargo do chamador.
     """
-    resultado: dict[int, int] = {}
+    resultado = ResultadoVarredura()
     watches = session.scalars(select(Watch).where(Watch.ativo)).all()
     if not watches:
         log.info("Nenhum watch ativo — nada a varrer")
@@ -47,8 +57,13 @@ def executar_varredura(session, providers: list[Provider]) -> dict[int, int]:
             except Exception:  # noqa: BLE001 — um provider caído não derruba o resto
                 log.exception("Provider %s falhou no watch %s", provider.nome, watch.id)
                 continue
-            total += len(persistir_quotes(session, watch, quotes))
-        resultado[watch.id] = total
+            novos = persistir_quotes(session, watch, quotes)
+            total += len(novos)
+            for snap in novos:
+                candidato = avaliar_snapshot(session, watch, snap)
+                if candidato:
+                    resultado.candidatos.append(candidato)
+        resultado.snapshots_por_watch[watch.id] = total
         log.info("Watch %s (%s): %s snapshots", watch.id, watch.nome, total)
     return resultado
 
@@ -58,9 +73,15 @@ def job_varredura() -> None:
     with SessionLocal() as session:
         try:
             resultado = executar_varredura(session, providers=[TravelpayoutsProvider()])
+            enviados = despachar(session, resultado.candidatos, canais_padrao())
             session.commit()
-            log.info("Varredura concluída: %s watches, %s snapshots",
-                     len(resultado), sum(resultado.values()))
+            log.info(
+                "Varredura concluída: %s watches, %s snapshots, %s candidatos, %s alertas",
+                len(resultado.snapshots_por_watch),
+                sum(resultado.snapshots_por_watch.values()),
+                len(resultado.candidatos),
+                len(enviados),
+            )
         except Exception:  # noqa: BLE001
             session.rollback()
             log.exception("Varredura abortada")
