@@ -1,4 +1,4 @@
-# FareWatch — monitor de passagens aéreas
+# VooFácil — monitor de passagens aéreas
 
 Bot pessoal que monitora preços de passagens aéreas (rota específica ou
 origem → região/país inteiro), guarda o histórico e alerta por Telegram e
@@ -33,7 +33,7 @@ degrada graciosamente sem elas, só não varre/alerta):
 ### Painel (criar/ver monitoramentos)
 
 ```bash
-.venv\Scripts\streamlit run farewatch\app\Painel.py
+.venv\Scripts\streamlit run voofacil\app\Painel.py
 ```
 
 Abre em `http://localhost:8501` (ou a porta configurada). Lá dá para criar
@@ -66,21 +66,21 @@ Streamlit. Duas formas de operar, escolha uma:
 .\scripts\instalar_tarefas_windows.ps1
 ```
 
-Cria 4 tarefas agendadas (`FareWatch-Varredura-0600/1230/2100` e
-`FareWatch-Explore-0500`) rodando `python -m farewatch.worker --once` /
+Cria 4 tarefas agendadas (`VooFacil-Varredura-0600/1230/2100` e
+`VooFacil-Explore-0500`) rodando `python -m voofacil.worker --once` /
 `--once-explore` nos horários certos. Por padrão só rodam com você
 logado (sem senha, sem admin). Para rodar mesmo desconectado, use
 `-RodarDesconectado` (pede senha da sua conta e precisa de PowerShell
 como administrador). Para remover: `.\scripts\instalar_tarefas_windows.ps1 -Remover`.
 
-Veja/gerencie em `taskschd.msc` → pasta `FareWatch`.
+Veja/gerencie em `taskschd.msc` → pasta `VooFacil`.
 
 ### Opção B — Worker como daemon (rodar manualmente ou via serviço)
 
 ```bash
-.venv\Scripts\python -m farewatch.worker            # fica rodando, agenda interna (APScheduler)
-.venv\Scripts\python -m farewatch.worker --once      # varredura única, sai
-.venv\Scripts\python -m farewatch.worker --once-explore   # busca ampla única, sai
+.venv\Scripts\python -m voofacil.worker            # fica rodando, agenda interna (APScheduler)
+.venv\Scripts\python -m voofacil.worker --once      # varredura única, sai
+.venv\Scripts\python -m voofacil.worker --once-explore   # busca ampla única, sai
 ```
 
 Use esta opção se preferir manter um terminal/serviço próprio ligado (ex.:
@@ -100,7 +100,7 @@ ainda mais. Todo alerta tenta confirmação ao vivo via SerpApi antes de sair
 (se configurada e dentro do orçamento de 250 buscas/mês) — sem confirmação,
 o alerta avisa que o preço é de cache e pode ter mudado.
 
-Esses parâmetros (cooldown, margens, orçamento) ficam em `farewatch/config.py`
+Esses parâmetros (cooldown, margens, orçamento) ficam em `voofacil/config.py`
 e podem ser sobrescritos no `.env`.
 
 ## 5. Diagnóstico
@@ -112,7 +112,7 @@ e podem ser sobrescritos no `.env`.
   ```bash
   .venv\Scripts\python scripts\smoke_tp.py GRU LIS
   ```
-  Se nenhum endpoint responder, o cliente em `farewatch/providers/travelpayouts.py`
+  Se nenhum endpoint responder, o cliente em `voofacil/providers/travelpayouts.py`
   precisa ser adaptado à API nova (ver comentários no topo do arquivo).
 - **Testes**: `.venv\Scripts\python -m pytest -q` (tudo offline, sem chamar
   APIs reais).

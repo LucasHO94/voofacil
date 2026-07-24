@@ -18,8 +18,8 @@ from decimal import Decimal
 
 import httpx
 
-from farewatch.config import settings
-from farewatch.schemas import PriceQuote
+from voofacil.config import settings
+from voofacil.schemas import PriceQuote
 
 log = logging.getLogger(__name__)
 

@@ -3,7 +3,7 @@ import json
 from datetime import date
 from decimal import Decimal
 
-from farewatch.models import (
+from voofacil.models import (
     Alerta,
     FonteSnapshot,
     Gatilho,

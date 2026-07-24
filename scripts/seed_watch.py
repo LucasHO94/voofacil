@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import select  # noqa: E402
 
-from farewatch.db import SessionLocal, init_db  # noqa: E402
-from farewatch.models import TipoWatch, Watch  # noqa: E402
+from voofacil.db import SessionLocal, init_db  # noqa: E402
+from voofacil.models import TipoWatch, Watch  # noqa: E402
 
 # Listas curadas de destinos por região (IATA) — editáveis à vontade
 REGIOES: dict[str, list[str]] = {
@@ -106,7 +106,7 @@ def cmd_listar(_args) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Gerencia watches do FareWatch")
+    parser = argparse.ArgumentParser(description="Gerencia watches do VooFacil")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def data(s: str) -> date:

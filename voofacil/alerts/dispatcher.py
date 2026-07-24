@@ -4,11 +4,11 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
-from farewatch.alerts.email import EmailChannel
-from farewatch.alerts.mensagem import Mensagem, montar_mensagem
-from farewatch.alerts.telegram import TelegramChannel
-from farewatch.models import Alerta, Watch
-from farewatch.schemas import Candidato
+from voofacil.alerts.email import EmailChannel
+from voofacil.alerts.mensagem import Mensagem, montar_mensagem
+from voofacil.alerts.telegram import TelegramChannel
+from voofacil.models import Alerta, Watch
+from voofacil.schemas import Candidato
 
 log = logging.getLogger(__name__)
 

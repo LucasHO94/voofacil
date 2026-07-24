@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from farewatch.models import Watch
-from farewatch.schemas import PriceQuote
+from voofacil.models import Watch
+from voofacil.schemas import PriceQuote
 
 
 @runtime_checkable

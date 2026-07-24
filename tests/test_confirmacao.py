@@ -2,9 +2,9 @@
 from datetime import date
 from decimal import Decimal
 
-from farewatch.engine.confirmacao import confirmar_candidatos
-from farewatch.engine.orcamento import registrar_chamada
-from farewatch.schemas import Candidato, PriceQuote
+from voofacil.engine.confirmacao import confirmar_candidatos
+from voofacil.engine.orcamento import registrar_chamada
+from voofacil.schemas import Candidato, PriceQuote
 
 
 def _candidato(preco="2890.00", snapshot_id=1) -> Candidato:

@@ -2,9 +2,9 @@
 from datetime import date
 from decimal import Decimal
 
-from farewatch.models import TipoWatch, Watch
-from farewatch.schemas import PriceQuote
-from farewatch.worker import _meses_a_frente, executar_explore
+from voofacil.models import TipoWatch, Watch
+from voofacil.schemas import PriceQuote
+from voofacil.worker import _meses_a_frente, executar_explore
 
 
 def _watch_regiao(session, **kw):

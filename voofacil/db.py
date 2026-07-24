@@ -1,22 +1,38 @@
-"""Engine e sessão SQLAlchemy. SQLite local — 1 escritor (worker) + leitores (UI)."""
+"""Engine e sessão SQLAlchemy.
+
+Dois modos, escolhidos pela DATABASE_URL:
+- SQLite local (dev): 1 escritor (worker) + leitores (UI) no mesmo arquivo.
+- Postgres/Neon (nuvem): estado compartilhado entre o worker (GitHub Actions)
+  e o painel (Streamlit Cloud). O Neon faz scale-to-zero e acorda na conexão,
+  então usamos pool_pre_ping + connect_timeout para tolerar o cold start.
+"""
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from farewatch.config import settings
+from voofacil.config import settings
 
-engine = create_engine(
-    settings.sqlalchemy_url,
-    echo=False,
-    # SQLite: permite uso pelo worker (thread do APScheduler) e pela UI
-    connect_args={"check_same_thread": False} if settings.sqlalchemy_url.startswith("sqlite") else {},
-)
+_url = settings.sqlalchemy_url
+if _url.startswith("sqlite"):
+    engine = create_engine(
+        _url,
+        echo=False,
+        connect_args={"check_same_thread": False},
+    )
+else:
+    # Postgres (Neon e afins): reconexão resiliente ao cold start do serverless
+    engine = create_engine(
+        _url,
+        echo=False,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 10},
+    )
 
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 def init_db() -> None:
     """Cria as tabelas se não existirem (projeto pequeno: sem Alembic por ora)."""
-    from farewatch import models  # noqa: F401 — registra os mapeamentos
+    from voofacil import models  # noqa: F401 — registra os mapeamentos
 
     models.Base.metadata.create_all(engine)
     _migrar_sqlite()

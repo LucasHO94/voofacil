@@ -1,9 +1,9 @@
-"""Worker do FareWatch — processo SEPARADO da UI Streamlit.
+"""Worker do VooFacil — processo SEPARADO da UI Streamlit.
 
 Roda a varredura periódica (APScheduler, 3x/dia com jitter) ou uma única vez:
 
-    python -m farewatch.worker --once     # varre agora e sai (teste/manual)
-    python -m farewatch.worker            # daemon com agendamento
+    python -m voofacil.worker --once     # varre agora e sai (teste/manual)
+    python -m voofacil.worker            # daemon com agendamento
 
 NUNCA importar/rodar isto dentro do Streamlit (a página re-executa a cada
 interação e criaria/mataria schedulers).
@@ -17,20 +17,20 @@ from datetime import date
 
 from sqlalchemy import select
 
-from farewatch.alerts.dispatcher import canais_padrao, despachar
-from farewatch.config import settings
-from farewatch.db import SessionLocal, init_db
-from farewatch.engine.confirmacao import confirmar_candidatos
-from farewatch.engine.detector import avaliar_snapshot
-from farewatch.engine.orcamento import ha_orcamento, registrar_chamada
-from farewatch.engine.store import persistir_quotes
-from farewatch.models import TipoWatch, Watch
-from farewatch.providers.base import Provider
-from farewatch.providers.serpapi_google import SerpApiProvider
-from farewatch.providers.travelpayouts import TravelpayoutsProvider
-from farewatch.schemas import Candidato
+from voofacil.alerts.dispatcher import canais_padrao, despachar
+from voofacil.config import settings
+from voofacil.db import SessionLocal, init_db
+from voofacil.engine.confirmacao import confirmar_candidatos
+from voofacil.engine.detector import avaliar_snapshot
+from voofacil.engine.orcamento import ha_orcamento, registrar_chamada
+from voofacil.engine.store import persistir_quotes
+from voofacil.models import TipoWatch, Watch
+from voofacil.providers.base import Provider
+from voofacil.providers.serpapi_google import SerpApiProvider
+from voofacil.providers.travelpayouts import TravelpayoutsProvider
+from voofacil.schemas import Candidato
 
-log = logging.getLogger("farewatch.worker")
+log = logging.getLogger("voofacil.worker")
 
 # Horários das varreduras diárias (hora local) — espalhados p/ fisgar quedas
 HORARIOS_VARREDURA = ["06:00", "12:30", "21:00"]
@@ -170,7 +170,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    parser = argparse.ArgumentParser(description="Worker de varredura do FareWatch")
+    parser = argparse.ArgumentParser(description="Worker de varredura do VooFacil")
     parser.add_argument("--once", action="store_true",
                         help="executa uma varredura única (Travelpayouts + confirmação) e sai")
     parser.add_argument("--once-explore", action="store_true",

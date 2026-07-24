@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import logging
 
-from farewatch.config import settings
-from farewatch.engine.orcamento import ha_orcamento, registrar_chamada
-from farewatch.providers.serpapi_google import SerpApiProvider
-from farewatch.schemas import Candidato
+from voofacil.config import settings
+from voofacil.engine.orcamento import ha_orcamento, registrar_chamada
+from voofacil.providers.serpapi_google import SerpApiProvider
+from voofacil.schemas import Candidato
 
 log = logging.getLogger(__name__)
 

@@ -19,10 +19,10 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
-from farewatch.config import settings
-from farewatch.engine.baseline import Baseline, baseline_rota
-from farewatch.models import Alerta, Gatilho, PriceSnapshot, Watch, utcnow
-from farewatch.schemas import Candidato, PriceQuote
+from voofacil.config import settings
+from voofacil.engine.baseline import Baseline, baseline_rota
+from voofacil.models import Alerta, Gatilho, PriceSnapshot, Watch, utcnow
+from voofacil.schemas import Candidato, PriceQuote
 
 
 def _quote_de_snapshot(snap: PriceSnapshot) -> PriceQuote:

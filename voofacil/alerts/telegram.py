@@ -10,8 +10,8 @@ import logging
 
 import httpx
 
-from farewatch.alerts.mensagem import Mensagem
-from farewatch.config import settings
+from voofacil.alerts.mensagem import Mensagem
+from voofacil.config import settings
 
 log = logging.getLogger(__name__)
 

@@ -1,0 +1,14 @@
+# Dependências de runtime do VooFácil.
+# Usado pelo Streamlit Community Cloud (painel) e pelo GitHub Actions (worker).
+# O Streamlit Cloud escolhe o PRIMEIRO arquivo de deps na ordem
+# uv.lock > Pipfile > environment.yml > requirements.txt > pyproject.toml,
+# então este arquivo vence o pyproject.toml no deploy.
+streamlit>=1.35
+sqlalchemy>=2.0
+pydantic>=2.7
+pydantic-settings>=2.2
+httpx>=0.27
+apscheduler>=3.10,<4
+plotly>=5.20
+# Driver Postgres (psycopg v3) para o Neon — dialeto postgresql+psycopg://
+psycopg[binary]>=3.1

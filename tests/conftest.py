@@ -3,7 +3,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from farewatch.models import Base
+from voofacil.models import Base
 
 
 @pytest.fixture()

@@ -1,0 +1,56 @@
+name: VooFacil Worker (varredura periodica)
+
+# Roda a varredura do VooFacil na nuvem, sem depender do PC do usuario.
+# Horarios em UTC (Brasil = UTC-3). Minuto 7 para fugir do congestionamento
+# do topo da hora (o cron do GitHub Actions pode atrasar/pular no minuto 0).
+on:
+  schedule:
+    - cron: '7 9,15,0 * * *'   # 06:07, 12:07, 21:07 BRT  -> varredura padrao
+    - cron: '7 3 * * *'        # 00:07 BRT               -> busca ampla (explore)
+  workflow_dispatch:            # botao "Run workflow" para disparo manual/teste
+
+# Evita duas rodadas simultaneas se uma demorar
+concurrency:
+  group: voofacil-worker
+  cancel-in-progress: false
+
+jobs:
+  varredura:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Rodar varredura
+        env:
+          DATABASE_URL:     ${{ secrets.DATABASE_URL }}
+          TP_TOKEN:         ${{ secrets.TP_TOKEN }}
+          SERPAPI_KEY:      ${{ secrets.SERPAPI_KEY }}
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SMTP_HOST:        smtp.gmail.com
+          SMTP_PORT:        '587'
+          SMTP_USER:        ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD:    ${{ secrets.SMTP_PASSWORD }}
+          ALERT_EMAIL_TO:   ${{ secrets.SMTP_USER }}
+          PYTHONPATH:       .
+        run: |
+          # github.event.schedule = string do cron que disparou (vazio no manual).
+          # O cron da busca ampla roda o explore; os demais (e o disparo manual) fazem a varredura padrao.
+          if [ "${{ github.event.schedule }}" = "7 3 * * *" ]; then
+            python -m voofacil.worker --once-explore
+          else
+            python -m voofacil.worker --once
+          fi

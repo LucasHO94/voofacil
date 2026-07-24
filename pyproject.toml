@@ -1,5 +1,5 @@
 [project]
-name = "farewatch"
+name = "voofacil"
 version = "0.1.0"
 description = "Bot pessoal de monitoramento de preços de passagens aéreas com alertas por Telegram/e-mail"
 requires-python = ">=3.12"
@@ -11,6 +11,7 @@ dependencies = [
     "apscheduler>=3.10,<4",
     "streamlit>=1.35",
     "plotly>=5.20",
+    "psycopg[binary]>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -24,7 +25,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["farewatch"]
+packages = ["voofacil"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

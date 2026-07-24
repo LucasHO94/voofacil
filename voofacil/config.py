@@ -1,9 +1,9 @@
-"""Configuração central do FareWatch — tudo vem do .env (nunca hardcode de segredo)."""
+"""Configuração central do VooFacil — tudo vem do .env (nunca hardcode de segredo)."""
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Raiz do projeto (pasta que contém farewatch/)
+# Raiz do projeto (pasta que contém voofacil/)
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -45,7 +45,7 @@ class Settings(BaseSettings):
             return self.database_url
         data_dir = BASE_DIR / "data"
         data_dir.mkdir(exist_ok=True)
-        return f"sqlite:///{data_dir / 'farewatch.db'}"
+        return f"sqlite:///{data_dir / 'voofacil.db'}"
 
 
 settings = Settings()

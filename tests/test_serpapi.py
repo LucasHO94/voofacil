@@ -6,7 +6,7 @@ import httpx
 import pytest
 import respx
 
-from farewatch.providers.serpapi_google import BASE_URL, SerpApiError, SerpApiProvider
+from voofacil.providers.serpapi_google import BASE_URL, SerpApiError, SerpApiProvider
 
 
 @pytest.fixture()

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Registra as tarefas agendadas do FareWatch no Agendador de Tarefas do Windows.
+    Registra as tarefas agendadas do VooFacil no Agendador de Tarefas do Windows.
 
 .DESCRIPTION
     Cria/atualiza tarefas que rodam o worker em modo --once (varredura) e
@@ -27,13 +27,13 @@ $ErrorActionPreference = "Stop"
 
 $RaizProjeto = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $RaizProjeto ".venv\Scripts\python.exe"
-$PastaTarefas = "FareWatch"
+$PastaTarefas = "VooFacil"
 
 $Tarefas = @(
-    @{ Nome = "FareWatch-Varredura-0600"; Hora = "06:00"; Args = "-m farewatch.worker --once" }
-    @{ Nome = "FareWatch-Varredura-1230"; Hora = "12:30"; Args = "-m farewatch.worker --once" }
-    @{ Nome = "FareWatch-Varredura-2100"; Hora = "21:00"; Args = "-m farewatch.worker --once" }
-    @{ Nome = "FareWatch-Explore-0500";   Hora = "05:00"; Args = "-m farewatch.worker --once-explore" }
+    @{ Nome = "VooFacil-Varredura-0600"; Hora = "06:00"; Args = "-m voofacil.worker --once" }
+    @{ Nome = "VooFacil-Varredura-1230"; Hora = "12:30"; Args = "-m voofacil.worker --once" }
+    @{ Nome = "VooFacil-Varredura-2100"; Hora = "21:00"; Args = "-m voofacil.worker --once" }
+    @{ Nome = "VooFacil-Explore-0500";   Hora = "05:00"; Args = "-m voofacil.worker --once-explore" }
 )
 
 if ($Remover) {

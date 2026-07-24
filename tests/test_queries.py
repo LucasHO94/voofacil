@@ -2,7 +2,7 @@
 from datetime import date
 from decimal import Decimal
 
-from farewatch.engine.queries import (
+from voofacil.engine.queries import (
     alertas_do_watch,
     alertas_recentes,
     alternar_ativo,
@@ -12,9 +12,9 @@ from farewatch.engine.queries import (
     historico_precos,
     listar_watches,
 )
-from farewatch.engine.store import persistir_quotes
-from farewatch.models import Alerta
-from farewatch.schemas import PriceQuote
+from voofacil.engine.store import persistir_quotes
+from voofacil.models import Alerta
+from voofacil.schemas import PriceQuote
 
 
 def test_criar_watch_rota(session):

@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from farewatch.providers.travelpayouts import (  # noqa: E402
+from voofacil.providers.travelpayouts import (  # noqa: E402
     ENDPOINTS,
     TravelpayoutsError,
     TravelpayoutsProvider,

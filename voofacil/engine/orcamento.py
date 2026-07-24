@@ -9,7 +9,7 @@ from datetime import date
 
 from sqlalchemy import select
 
-from farewatch.models import ContadorApi
+from voofacil.models import ContadorApi
 
 
 def _ano_mes(hoje: date | None = None) -> str:

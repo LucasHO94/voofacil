@@ -4,8 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from farewatch.models import Gatilho, Watch
-from farewatch.schemas import Candidato
+from voofacil.models import Gatilho, Watch
+from voofacil.schemas import Candidato
 
 ROTULO_GATILHO = {
     Gatilho.ERROR_FARE.value: "🚨 POSSÍVEL TARIFA-ERRO (compre rápido, pode durar minutos)",

@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
-from farewatch.models import PriceSnapshot
+from voofacil.models import PriceSnapshot
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-"""Modelos ORM do FareWatch.
+"""Modelos ORM do VooFacil.
 
 Três entidades centrais:
 - Watch: o que monitorar (rota específica ou origem->região com lista de destinos)

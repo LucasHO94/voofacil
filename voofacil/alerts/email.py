@@ -5,8 +5,8 @@ import logging
 import smtplib
 from email.mime.text import MIMEText
 
-from farewatch.alerts.mensagem import Mensagem
-from farewatch.config import settings
+from voofacil.alerts.mensagem import Mensagem
+from voofacil.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ def _html_email(msg: Mensagem) -> str:
     return (
         '<div style="font-family:sans-serif;max-width:520px">'
         f"<p>{corpo}</p>{botao}"
-        '<p style="color:#888;font-size:12px">FareWatch — seu monitor de passagens</p>'
+        '<p style="color:#888;font-size:12px">VooFácil — seu monitor de passagens</p>'
         "</div>"
     )
 

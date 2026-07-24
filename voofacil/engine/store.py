@@ -1,8 +1,8 @@
 """Persistência das cotações coletadas — transforma PriceQuote em PriceSnapshot."""
 from __future__ import annotations
 
-from farewatch.models import PriceSnapshot, Watch
-from farewatch.schemas import PriceQuote
+from voofacil.models import PriceSnapshot, Watch
+from voofacil.schemas import PriceQuote
 
 
 def persistir_quotes(session, watch: Watch, quotes: list[PriceQuote]) -> list[PriceSnapshot]:

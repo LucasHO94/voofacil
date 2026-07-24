@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
-from farewatch.models import Alerta, PriceSnapshot, TipoWatch, Watch
+from voofacil.models import Alerta, PriceSnapshot, TipoWatch, Watch
 
 
 def listar_watches(session) -> list[Watch]:

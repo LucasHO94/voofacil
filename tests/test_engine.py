@@ -2,11 +2,11 @@
 from datetime import date
 from decimal import Decimal
 
-from farewatch.engine.baseline import baseline_rota
-from farewatch.engine.store import persistir_quotes
-from farewatch.models import PriceSnapshot, TipoWatch, Watch
-from farewatch.schemas import PriceQuote
-from farewatch.worker import executar_varredura
+from voofacil.engine.baseline import baseline_rota
+from voofacil.engine.store import persistir_quotes
+from voofacil.models import PriceSnapshot, TipoWatch, Watch
+from voofacil.schemas import PriceQuote
+from voofacil.worker import executar_varredura
 
 
 def _watch(session, **kw):

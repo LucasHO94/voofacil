@@ -7,8 +7,8 @@ import httpx
 import pytest
 import respx
 
-from farewatch.models import TipoWatch, Watch
-from farewatch.providers.travelpayouts import (
+from voofacil.models import TipoWatch, Watch
+from voofacil.providers.travelpayouts import (
     BASE_URL,
     TravelpayoutsProvider,
     _meses_da_janela,
@@ -104,7 +104,7 @@ def test_month_matrix_formato_v2_lista(tp):
 @respx.mock
 def test_retry_em_429_respeita_retry_after(tp, monkeypatch):
     esperas = []
-    monkeypatch.setattr("farewatch.providers.travelpayouts.time.sleep", esperas.append)
+    monkeypatch.setattr("voofacil.providers.travelpayouts.time.sleep", esperas.append)
     rota = respx.get(f"{BASE_URL}/v1/prices/calendar")
     rota.side_effect = [
         httpx.Response(429, headers={"Retry-After": "3"}),

@@ -2,6 +2,9 @@
 .env
 *.env
 !.env.example
+secrets.toml
+.streamlit/secrets.toml
+!.streamlit/secrets.toml.example
 
 # Banco de dados local — NUNCA commitar
 *.db

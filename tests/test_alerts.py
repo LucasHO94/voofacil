@@ -6,11 +6,11 @@ from decimal import Decimal
 import httpx
 import respx
 
-from farewatch.alerts.dispatcher import despachar
-from farewatch.alerts.mensagem import fmt_brl, montar_mensagem
-from farewatch.alerts.telegram import API_URL, TelegramChannel
-from farewatch.models import Alerta, TipoWatch, Watch
-from farewatch.schemas import Candidato, PriceQuote
+from voofacil.alerts.dispatcher import despachar
+from voofacil.alerts.mensagem import fmt_brl, montar_mensagem
+from voofacil.alerts.telegram import API_URL, TelegramChannel
+from voofacil.models import Alerta, TipoWatch, Watch
+from voofacil.schemas import Candidato, PriceQuote
 
 
 def _watch(session, **kw):

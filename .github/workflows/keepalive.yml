@@ -1,0 +1,24 @@
+name: Keepalive (evita desativar o cron)
+
+# Em repositorio PUBLICO, o GitHub desativa workflows agendados apos 60 dias
+# SEM atividade no repo (rodadas agendadas nao contam). Este job faz um commit
+# vazio periodico para manter o worker.yml agendado ativo.
+on:
+  schedule:
+    - cron: '30 6 1 * *'     # dia 1 de cada mes, 06:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commit vazio de keepalive
+        run: |
+          git config user.name  "voofacil-keepalive[bot]"
+          git config user.email "voofacil-keepalive@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive (mantem o cron do worker ativo)"
+          git push

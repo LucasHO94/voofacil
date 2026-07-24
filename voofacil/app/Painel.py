@@ -1,11 +1,11 @@
-"""Painel Streamlit do FareWatch — CRUD de watches, histórico e alertas.
+"""Painel Streamlit do VooFacil — CRUD de watches, histórico e alertas.
 
 Só UI: nenhuma regra de negócio aqui (segue o padrão do B2F). O worker
-(farewatch/worker.py) roda em processo SEPARADO — este painel só lê o
+(voofacil/worker.py) roda em processo SEPARADO — este painel só lê o
 banco e, no botão "varrer agora", dispara uma varredura síncrona pontual.
 
 Rodar com:
-    streamlit run farewatch/app/Painel.py
+    streamlit run voofacil/app/Painel.py
 """
 from __future__ import annotations
 
@@ -16,15 +16,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-import plotly.graph_objects as go
-import streamlit as st
+# CRÍTICO: injeta st.secrets -> os.environ ANTES de importar voofacil.config/db,
+# para que o DATABASE_URL e os tokens do Streamlit Cloud sejam lidos pela config.
+from voofacil.secrets_bridge import carregar_segredos_streamlit  # noqa: E402
 
-from farewatch.alerts.dispatcher import canais_padrao, despachar
-from farewatch.alerts.mensagem import fmt_brl
-from farewatch.db import SessionLocal, init_db
-from farewatch.engine.baseline import baseline_rota
-from farewatch.engine.confirmacao import confirmar_candidatos
-from farewatch.engine.queries import (
+carregar_segredos_streamlit()
+
+import plotly.graph_objects as go  # noqa: E402
+import streamlit as st  # noqa: E402
+
+from voofacil.alerts.dispatcher import canais_padrao, despachar  # noqa: E402
+from voofacil.alerts.mensagem import fmt_brl
+from voofacil.db import SessionLocal, init_db
+from voofacil.engine.baseline import baseline_rota
+from voofacil.engine.confirmacao import confirmar_candidatos
+from voofacil.engine.queries import (
     alertas_do_watch,
     alertas_recentes,
     alternar_ativo,
@@ -34,11 +40,11 @@ from farewatch.engine.queries import (
     historico_precos,
     listar_watches,
 )
-from farewatch.providers.travelpayouts import TravelpayoutsProvider
-from farewatch.worker import executar_varredura
+from voofacil.providers.travelpayouts import TravelpayoutsProvider
+from voofacil.worker import executar_varredura
 from scripts.seed_watch import ARRIVAL_AREA_ID, REGIOES
 
-st.set_page_config(page_title="FareWatch", page_icon="✈️", layout="wide")
+st.set_page_config(page_title="VooFácil", page_icon="✈️", layout="wide")
 init_db()
 
 
@@ -181,7 +187,7 @@ def aba_alertas(session):
 def main() -> None:
     session = _session()
 
-    st.title("✈️ FareWatch — monitor de passagens aéreas")
+    st.title("✈️ VooFácil — monitor de passagens aéreas")
     if st.sidebar.button("🔎 Varrer agora", type="primary", width="stretch"):
         with st.spinner("Consultando preços..."):
             resultado = executar_varredura(session, providers=[TravelpayoutsProvider()])

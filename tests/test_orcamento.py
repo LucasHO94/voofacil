@@ -1,7 +1,7 @@
 """Testes do controle de orçamento mensal por provedor."""
 from datetime import date
 
-from farewatch.engine.orcamento import consumo_atual, ha_orcamento, registrar_chamada
+from voofacil.engine.orcamento import consumo_atual, ha_orcamento, registrar_chamada
 
 
 def test_consumo_inicial_e_zero(session):
