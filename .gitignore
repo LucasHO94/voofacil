@@ -1,0 +1,25 @@
+# Segredos — NUNCA commitar
+.env
+*.env
+!.env.example
+
+# Banco de dados local — NUNCA commitar
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / SO
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
