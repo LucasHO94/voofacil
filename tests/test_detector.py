@@ -138,3 +138,38 @@ def test_cooldown_nao_afeta_outra_data(session):
     snap2 = persistir_quotes(session, w, [_quote("2900", dia=25)])[0]   # outro dia de voo
 
     assert em_cooldown(session, w.id, snap2) is False
+
+
+def _precos_uniformes(qtd: int, inicio=3000, passo=50) -> list[str]:
+    return [str(inicio + passo * i) for i in range(qtd)]
+
+
+def test_percentil_dispara_com_historico_suficiente(session):
+    w = _watch(session)   # sem limite fixo
+    _historico(session, w, _precos_uniformes(20))   # 3000..3950, warmup_percentil=20
+    # abaixo do p25 (~3200s), mas acima do minimo*0.98 (2940) e do error fare (~1725)
+    snap = persistir_quotes(session, w, [_quote("3150", dia=25)])[0]
+
+    cand = avaliar_snapshot(session, w, snap)
+
+    assert cand is not None
+    assert cand.gatilho == "PERCENTIL"
+
+
+def test_percentil_nao_dispara_acima_do_p25(session):
+    w = _watch(session)
+    _historico(session, w, _precos_uniformes(20))
+    snap = persistir_quotes(session, w, [_quote("3800", dia=25)])[0]
+
+    assert avaliar_snapshot(session, w, snap) is None
+
+
+def test_percentil_exige_warmup_proprio_maior_que_novo_minimo(session):
+    w = _watch(session)
+    # 10 amostras: aquecido para novo_minimo/error_fare (warmup=5), mas
+    # ainda abaixo do warmup_percentil (20) -> percentil deve ficar desativado
+    _historico(session, w, _precos_uniformes(10))
+    # abaixo do p25 desse historico curto, mas nao abaixo do minimo nem error fare
+    snap = persistir_quotes(session, w, [_quote("3050", dia=25)])[0]
+
+    assert avaliar_snapshot(session, w, snap) is None

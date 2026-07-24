@@ -4,7 +4,10 @@ Ordem de avaliação (a primeira que disparar define o gatilho):
 1. ERROR_FARE   — preço <= 50% da média histórica (tarifa-erro; prioridade máxima)
 2. LIMITE       — preço <= limite fixo definido no watch (piso de segurança)
 3. NOVO_MINIMO  — preço < mínimo histórico - margem (trailing minimum)
-   (PERCENTIL entra na fase 2, quando houver semanas de histórico)
+4. PERCENTIL    — preço <= p25 da distribuição (imita "typical price" do Google
+   Flights); exige mais histórico que as demais camadas (~3-6 semanas de
+   coleta) para não gerar ruído com poucas amostras — útil sobretudo em
+   watches sem preco_limite (busca ampla) que ainda não têm um piso definido.
 
 Camadas estatísticas exigem warm-up (N snapshots) para não gerar ruído no
 cold start. Cooldown de 12h impede re-alertar o mesmo preço/rota/dia.
@@ -72,6 +75,10 @@ def _gatilho_disparado(watch: Watch, snap: PriceSnapshot, base: Baseline | None)
         margem = Decimal(str(settings.margem_novo_minimo))
         if snap.preco < base.minimo * (Decimal("1") - margem):
             return Gatilho.NOVO_MINIMO.value
+
+    if base is not None and base.n >= settings.warmup_percentil:
+        if snap.preco <= base.p25:
+            return Gatilho.PERCENTIL.value
 
     return None
 

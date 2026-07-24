@@ -1,0 +1,118 @@
+# FareWatch — monitor de passagens aéreas
+
+Bot pessoal que monitora preços de passagens aéreas (rota específica ou
+origem → região/país inteiro), guarda o histórico e alerta por Telegram e
+e-mail quando o preço cai abaixo de um limite ou do menor valor já visto.
+
+Projeto independente — não compartilha código, banco ou repositório com
+nenhum outro projeto do workspace.
+
+## 1. Instalação
+
+```bash
+python -m venv .venv
+.venv\Scripts\pip install -e ".[dev]"
+copy .env.example .env
+```
+
+Edite o `.env` com suas chaves (nenhuma é obrigatória para começar — o app
+degrada graciosamente sem elas, só não varre/alerta):
+
+| Variável | Onde conseguir | Obrigatória? |
+|---|---|---|
+| `TP_TOKEN` | Cadastro grátis em [travelpayouts.com](https://www.travelpayouts.com) (programa de afiliados Aviasales) → token no painel | Sim, para varrer preços |
+| `SERPAPI_KEY` | Cadastro em [serpapi.com](https://serpapi.com) (free tier 250 buscas/mês) | Não — sem ela, os alertas saem sem confirmação ao vivo |
+| `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` | Fale com `@BotFather` no Telegram (`/newbot`), depois mande `/start` ao bot e leia seu `chat_id` em `https://api.telegram.org/bot<TOKEN>/getUpdates` | Não — sem ela, sem alerta no Telegram |
+| `SMTP_USER` / `SMTP_PASSWORD` / `ALERT_EMAIL_TO` | Uma senha de app do Gmail (não a senha normal da conta) | Não — sem ela, sem alerta por e-mail |
+
+**Nunca** commite o `.env` nem o banco (`data/*.db`) — já protegidos pelo
+`.gitignore`. Antes de qualquer `git push`, rode `git ls-files` e confira.
+
+## 2. Uso do dia a dia
+
+### Painel (criar/ver monitoramentos)
+
+```bash
+.venv\Scripts\streamlit run farewatch\app\Painel.py
+```
+
+Abre em `http://localhost:8501` (ou a porta configurada). Lá dá para criar
+watches de rota específica ou de região, ver o histórico de preços em
+gráfico e a lista de alertas enviados. O botão "Varrer agora" roda uma
+varredura pontual — a varredura periódica de verdade é o worker (seção 3).
+
+### Linha de comando (alternativa ao painel)
+
+```bash
+.venv\Scripts\python scripts\seed_watch.py rota GRU LIS 2026-09-01 2026-09-30 --limite 3500
+.venv\Scripts\python scripts\seed_watch.py regiao GRU europa 2026-09-01 2026-11-30 --limite 4000
+.venv\Scripts\python scripts\seed_watch.py listar
+```
+
+Regiões disponíveis: `brasil_capitais`, `nordeste`, `america_sul`, `europa`,
+`america_norte`, `asia` (editável em `scripts/seed_watch.py`, dict `REGIOES`).
+Só a região `europa` tem `kgmid` cadastrado para a busca ampla via SerpApi
+Explore (`ARRIVAL_AREA_ID`); as demais funcionam com a lista curada, só sem
+o Explore diário.
+
+## 3. Rodando a varredura periódica
+
+O worker é um **processo separado** do painel — nunca roda dentro do
+Streamlit. Duas formas de operar, escolha uma:
+
+### Opção A — Windows Task Scheduler (recomendada para uso contínuo)
+
+```powershell
+.\scripts\instalar_tarefas_windows.ps1
+```
+
+Cria 4 tarefas agendadas (`FareWatch-Varredura-0600/1230/2100` e
+`FareWatch-Explore-0500`) rodando `python -m farewatch.worker --once` /
+`--once-explore` nos horários certos. Por padrão só rodam com você
+logado (sem senha, sem admin). Para rodar mesmo desconectado, use
+`-RodarDesconectado` (pede senha da sua conta e precisa de PowerShell
+como administrador). Para remover: `.\scripts\instalar_tarefas_windows.ps1 -Remover`.
+
+Veja/gerencie em `taskschd.msc` → pasta `FareWatch`.
+
+### Opção B — Worker como daemon (rodar manualmente ou via serviço)
+
+```bash
+.venv\Scripts\python -m farewatch.worker            # fica rodando, agenda interna (APScheduler)
+.venv\Scripts\python -m farewatch.worker --once      # varredura única, sai
+.venv\Scripts\python -m farewatch.worker --once-explore   # busca ampla única, sai
+```
+
+Use esta opção se preferir manter um terminal/serviço próprio ligado (ex.:
+numa VPS Linux com `systemd`/`screen`, em vez do Task Scheduler do Windows).
+
+## 4. Como funciona a detecção de "bom preço"
+
+Camadas avaliadas em ordem (a primeira que disparar vence):
+
+1. **ERROR_FARE** — preço ≤ 50% da média histórica (tarifa-erro, alerta imediato)
+2. **LIMITE** — preço ≤ limite fixo que você definiu no watch
+3. **NOVO_MINIMO** — preço abaixo do menor já registrado (com margem de 2% contra ruído)
+4. **PERCENTIL** — preço entre os 25% mais baratos do histórico da rota+mês (só ativa após ~20 amostras, indicado sobretudo para watches de região sem limite fixo)
+
+Cada rota tem cooldown de 12h: não alerta de novo a menos que o preço caia
+ainda mais. Todo alerta tenta confirmação ao vivo via SerpApi antes de sair
+(se configurada e dentro do orçamento de 250 buscas/mês) — sem confirmação,
+o alerta avisa que o preço é de cache e pode ter mudado.
+
+Esses parâmetros (cooldown, margens, orçamento) ficam em `farewatch/config.py`
+e podem ser sobrescritos no `.env`.
+
+## 5. Diagnóstico
+
+- **"Falha calendar ... TP_TOKEN ausente"**: normal sem token configurado; a
+  varredura roda mas não traz cotações.
+- **Endpoints da Travelpayouts podem ter migrado de versão** — antes de
+  confiar no monitoramento, rode:
+  ```bash
+  .venv\Scripts\python scripts\smoke_tp.py GRU LIS
+  ```
+  Se nenhum endpoint responder, o cliente em `farewatch/providers/travelpayouts.py`
+  precisa ser adaptado à API nova (ver comentários no topo do arquivo).
+- **Testes**: `.venv\Scripts\python -m pytest -q` (tudo offline, sem chamar
+  APIs reais).
