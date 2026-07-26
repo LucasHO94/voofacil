@@ -28,6 +28,51 @@ def test_criar_watch_rota(session):
     assert listar_watches(session) == [w]
 
 
+def test_criar_watch_rota_com_criterios_avancados(session):
+    w = criar_watch_rota(
+        session, "GRU -> LIS set/26 flex", "gru", "lis",
+        date(2026, 9, 1), date(2026, 9, 30), Decimal("3500"),
+        ida_volta=True,
+        duracao_min=10,
+        duracao_max=20,
+        tipo_data_ida="APROXIMADA",
+        tipo_data_volta="INTERVALO",
+        flexibilidade_dias=3,
+        data_volta_ini=date(2026, 9, 15),
+        data_volta_fim=date(2026, 10, 5),
+        mes_especifico=9,
+        preco_minimo=Decimal("1500"),
+        preco_aproximado=Decimal("2800"),
+    )
+
+    assert w.id is not None
+    assert w.duracao_min == 10
+    assert w.duracao_max == 20
+    assert w.tipo_data_ida == "APROXIMADA"
+    assert w.tipo_data_volta == "INTERVALO"
+    assert w.flexibilidade_dias == 3
+    assert w.data_volta_ini == date(2026, 9, 15)
+    assert w.data_volta_fim == date(2026, 10, 5)
+    assert w.mes_especifico == 9
+    assert w.preco_minimo == Decimal("1500")
+    assert w.preco_aproximado == Decimal("2800")
+
+
+def test_criar_watch_regiao_com_criterios_avancados(session):
+    w = criar_watch_regiao(
+        session, "GRU -> Europa flex", "gru", ["lis", "mad"],
+        date(2026, 9, 1), date(2026, 11, 30), None,
+        mes_especifico=10,
+        preco_minimo=Decimal("1000"),
+    )
+
+    assert w.mes_especifico == 10
+    assert w.preco_minimo == Decimal("1000")
+    # defaults preservados para os demais kwargs novos
+    assert w.tipo_data_ida == "INTERVALO"
+    assert w.tipo_data_volta == "INTERVALO"
+
+
 def test_criar_watch_regiao_normaliza_destinos(session):
     w = criar_watch_regiao(
         session, "GRU -> Europa", "gru", ["lis", "mad"],

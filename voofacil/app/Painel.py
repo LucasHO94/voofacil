@@ -40,8 +40,7 @@ from voofacil.engine.queries import (
     historico_precos,
     listar_watches,
 )
-from voofacil.providers.travelpayouts import TravelpayoutsProvider
-from voofacil.worker import executar_varredura
+from voofacil.worker import _providers_padrao, executar_varredura
 from scripts.seed_watch import ARRIVAL_AREA_ID, REGIOES
 
 st.set_page_config(page_title="VooFácil", page_icon="✈️", layout="wide")
@@ -91,6 +90,24 @@ def _grafico_historico(session, watch) -> go.Figure:
     return fig
 
 
+MESES_PT = [
+    "Nenhum", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
+]  # índice = mês (1-12); índice 0 ("Nenhum") = sem restrição de mês
+
+TIPOS_DATA = ["INTERVALO", "APROXIMADA", "EXATA"]
+_ROTULOS_TIPO_DATA_IDA = {
+    "INTERVALO": "Intervalo (usa as datas de embarque acima)",
+    "APROXIMADA": "Data aproximada (com tolerância)",
+    "EXATA": "Data exata",
+}
+_ROTULOS_TIPO_DATA_VOLTA = {
+    "INTERVALO": "Deixe o calendário decidir (padrão)",
+    "APROXIMADA": "Data aproximada (com tolerância)",
+    "EXATA": "Data exata",
+}
+
+
 def aba_watches(session):
     st.subheader("Meus monitoramentos")
 
@@ -113,46 +130,214 @@ def aba_watches(session):
 
     st.divider()
     st.subheader("Novo monitoramento")
-    tipo = st.radio("Tipo", ["Rota específica", "Região/país (busca ampla)"], horizontal=True)
+    tipo = st.radio(
+        "Tipo",
+        ["Rota específica", "Região/país (busca ampla)", "Multidestino personalizado"],
+        horizontal=True,
+    )
+
+    # ---------- Critérios avançados (opcionais) ----------
+    # FORA do st.form: widgets dentro de um form só disparam rerun no submit,
+    # então os SELETORES que decidem quais campos aparecem (mesmo padrão já
+    # usado pelo radio "Tipo" acima) precisam ficar aqui para reagir na hora.
+    # Os campos de VALOR correspondentes (datas/números) ficam dentro do
+    # form, renderizados condicionalmente a partir destas escolhas.
+    with st.expander("Critérios avançados (opcional)"):
+        st.caption("Deixe como está para o comportamento padrão: qualquer data dentro da "
+                   "janela de embarque abaixo, ida e volta, sem piso de preço.")
+
+        somente_ida = st.checkbox("Somente ida (sem volta)")
+
+        st.markdown("**Data de embarque**")
+        tipo_data_ida = st.selectbox(
+            "Tipo de data de embarque", TIPOS_DATA,
+            format_func=lambda t: _ROTULOS_TIPO_DATA_IDA[t],
+        )
+
+        tipo_data_volta = "INTERVALO"
+        usar_janela_volta = False
+        modo_duracao = "Sem restrição"
+        if not somente_ida:
+            st.markdown("**Data de desembarque (retorno)**")
+            tipo_data_volta = st.selectbox(
+                "Tipo de data de desembarque", TIPOS_DATA,
+                format_func=lambda t: _ROTULOS_TIPO_DATA_VOLTA[t],
+                key="sel_tipo_data_volta",
+            )
+            if tipo_data_volta == "INTERVALO":
+                usar_janela_volta = st.checkbox(
+                    "Definir janela própria de desembarque (padrão: calendário decide)",
+                )
+            st.markdown("**Duração da estadia**")
+            modo_duracao = st.radio(
+                "Duração", ["Sem restrição", "Exata", "Faixa (mínimo/máximo)"],
+                horizontal=True,
+            )
+
+        st.markdown("**Mês específico**")
+        mes_nome = st.selectbox("Restringir a um mês", MESES_PT)
+        mes_especifico = MESES_PT.index(mes_nome) if mes_nome != "Nenhum" else None
+
+        st.markdown("**Preço**")
+        cp1, cp2 = st.columns(2)
+        minimo_str = cp1.text_input("Preço mínimo em R$ (opcional)", placeholder="1500.00")
+        aprox_str = cp2.text_input("Preço aproximado em R$ (opcional)", placeholder="2800.00")
+
+    precisa_flexibilidade = tipo_data_ida == "APROXIMADA" or (
+        not somente_ida and tipo_data_volta == "APROXIMADA"
+    )
+    precisa_campos_avancados = (
+        tipo_data_ida != "INTERVALO"
+        or precisa_flexibilidade
+        or (not somente_ida and (
+            tipo_data_volta != "INTERVALO"
+            or usar_janela_volta
+            or modo_duracao != "Sem restrição"
+        ))
+    )
 
     with st.form("novo_watch", clear_on_submit=True):
         origem = st.text_input("Origem (IATA)", max_chars=3, placeholder="GRU").upper()
         c1, c2 = st.columns(2)
         data_ini = c1.date_input("Embarque a partir de", value=date.today() + timedelta(days=30))
         data_fim = c2.date_input("Até", value=date.today() + timedelta(days=90))
-        limite_str = st.text_input("Preço-limite em R$ (opcional)", placeholder="3500.00")
+        limite_str = st.text_input("Preço máximo em R$ (opcional)", placeholder="3500.00")
 
+        destino = regiao = None
+        multidestino_str = ""
         if tipo == "Rota específica":
             destino = st.text_input("Destino (IATA)", max_chars=3, placeholder="LIS").upper()
-        else:
+        elif tipo == "Região/país (busca ampla)":
             regiao = st.selectbox("Região", sorted(REGIOES))
             st.caption(f"{len(REGIOES.get(regiao, []))} destinos na lista curada"
                        + (" · busca ampla via SerpApi Explore habilitada"
                           if regiao in ARRIVAL_AREA_ID else " · sem kgmid — só a lista curada"))
+        else:
+            multidestino_str = st.text_area(
+                "Destinos (códigos IATA separados por vírgula)",
+                placeholder="LIS, MAD, CDG, FCO",
+            )
+            st.caption("Vira um monitoramento tipo Região — sem busca ampla via SerpApi Explore "
+                       "(sem kgmid para uma lista personalizada).")
+
+        # Valores dependentes das escolhas do expander acima — só aparecem
+        # quando relevantes, então o form continua simples por padrão.
+        data_ida_alvo = None
+        data_volta_ini_form = data_volta_fim_form = None
+        duracao_min = duracao_max = None
+        flexibilidade_dias = None
+        if precisa_campos_avancados:
+            st.caption("Valores dos critérios avançados escolhidos acima:")
+
+            if tipo_data_ida == "EXATA":
+                data_ida_alvo = st.date_input(
+                    "Data exata de embarque", value=date.today() + timedelta(days=30),
+                    key="data_ida_exata",
+                )
+            elif tipo_data_ida == "APROXIMADA":
+                data_ida_alvo = st.date_input(
+                    "Data alvo de embarque", value=date.today() + timedelta(days=30),
+                    key="data_ida_aprox",
+                )
+
+            if not somente_ida:
+                if tipo_data_volta == "EXATA":
+                    data_volta_ini_form = st.date_input(
+                        "Data exata de desembarque", value=date.today() + timedelta(days=37),
+                        key="data_volta_exata",
+                    )
+                elif tipo_data_volta == "APROXIMADA":
+                    data_volta_ini_form = st.date_input(
+                        "Data alvo de desembarque", value=date.today() + timedelta(days=37),
+                        key="data_volta_aprox",
+                    )
+                elif usar_janela_volta:
+                    cv1, cv2 = st.columns(2)
+                    data_volta_ini_form = cv1.date_input(
+                        "Desembarque a partir de", value=date.today() + timedelta(days=37),
+                        key="data_volta_ini",
+                    )
+                    data_volta_fim_form = cv2.date_input(
+                        "Até", value=date.today() + timedelta(days=97),
+                        key="data_volta_fim",
+                    )
+
+                if modo_duracao == "Exata":
+                    dur = st.number_input("Noites", min_value=1, max_value=180, value=7, step=1)
+                    duracao_min = duracao_max = int(dur)
+                elif modo_duracao == "Faixa (mínimo/máximo)":
+                    cd1, cd2 = st.columns(2)
+                    duracao_min = int(cd1.number_input(
+                        "Mínimo (noites)", min_value=1, max_value=180, value=7, step=1,
+                    ))
+                    duracao_max = int(cd2.number_input(
+                        "Máximo (noites)", min_value=1, max_value=180, value=14, step=1,
+                    ))
+
+            if precisa_flexibilidade:
+                flexibilidade_dias = int(st.number_input(
+                    "Tolerância (dias) — usada nas datas aproximadas acima",
+                    min_value=0, max_value=60, value=3, step=1,
+                ))
 
         if st.form_submit_button("Criar monitoramento", type="primary"):
             try:
                 limite = Decimal(limite_str) if limite_str.strip() else None
+                preco_minimo = Decimal(minimo_str) if minimo_str.strip() else None
+                preco_aproximado = Decimal(aprox_str) if aprox_str.strip() else None
             except InvalidOperation:
-                st.error("Preço-limite inválido.")
+                st.error("Preço inválido — use números (ex.: 3500.00).")
                 return
             if not origem or len(origem) != 3:
                 st.error("Informe a origem em código IATA (3 letras).")
                 return
+
+            # Data(s) EXATA/APROXIMADA substituem a janela simples (data_ini/data_fim)
+            if tipo_data_ida in ("EXATA", "APROXIMADA") and data_ida_alvo is not None:
+                ini_final = fim_final = data_ida_alvo
+            else:
+                ini_final, fim_final = data_ini, data_fim
+
+            kwargs_avancados = dict(
+                ida_volta=not somente_ida,
+                duracao_min=duracao_min,
+                duracao_max=duracao_max,
+                tipo_data_ida=tipo_data_ida,
+                tipo_data_volta=tipo_data_volta if not somente_ida else "INTERVALO",
+                flexibilidade_dias=flexibilidade_dias,
+                data_volta_ini=data_volta_ini_form if not somente_ida else None,
+                data_volta_fim=data_volta_fim_form if not somente_ida else None,
+                mes_especifico=mes_especifico,
+                preco_minimo=preco_minimo,
+                preco_aproximado=preco_aproximado,
+            )
 
             if tipo == "Rota específica":
                 if not destino or len(destino) != 3:
                     st.error("Informe o destino em código IATA (3 letras).")
                     return
                 criar_watch_rota(
-                    session, f"{origem} -> {destino} {data_ini:%d/%m}-{data_fim:%d/%m/%Y}",
-                    origem, destino, data_ini, data_fim, limite,
+                    session, f"{origem} -> {destino} {ini_final:%d/%m}-{fim_final:%d/%m/%Y}",
+                    origem, destino, ini_final, fim_final, limite,
+                    **kwargs_avancados,
+                )
+            elif tipo == "Região/país (busca ampla)":
+                criar_watch_regiao(
+                    session, f"{origem} -> {regiao} {ini_final:%d/%m}-{fim_final:%d/%m/%Y}",
+                    origem, REGIOES[regiao], ini_final, fim_final, limite,
+                    arrival_area_id=ARRIVAL_AREA_ID.get(regiao),
+                    **kwargs_avancados,
                 )
             else:
+                destinos_custom = [d.strip().upper() for d in multidestino_str.split(",") if d.strip()]
+                if not destinos_custom:
+                    st.error("Informe ao menos um destino IATA (separado por vírgula).")
+                    return
                 criar_watch_regiao(
-                    session, f"{origem} -> {regiao} {data_ini:%d/%m}-{data_fim:%d/%m/%Y}",
-                    origem, REGIOES[regiao], data_ini, data_fim, limite,
-                    arrival_area_id=ARRIVAL_AREA_ID.get(regiao),
+                    session,
+                    f"{origem} -> {'/'.join(destinos_custom)} {ini_final:%d/%m}-{fim_final:%d/%m/%Y}",
+                    origem, destinos_custom, ini_final, fim_final, limite,
+                    **kwargs_avancados,
                 )
             st.success("Monitoramento criado!")
             st.rerun()
@@ -190,7 +375,7 @@ def main() -> None:
     st.title("✈️ VooFácil — monitor de passagens aéreas")
     if st.sidebar.button("🔎 Varrer agora", type="primary", width="stretch"):
         with st.spinner("Consultando preços..."):
-            resultado = executar_varredura(session, providers=[TravelpayoutsProvider()])
+            resultado = executar_varredura(session, providers=_providers_padrao(session))
             confirmados = confirmar_candidatos(session, resultado.candidatos)
             enviados = despachar(session, confirmados, canais_padrao())
             session.commit()

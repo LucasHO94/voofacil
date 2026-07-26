@@ -1,12 +1,16 @@
 name: VooFacil Worker (varredura periodica)
 
 # Roda a varredura do VooFacil na nuvem, sem depender do PC do usuario.
-# Horarios em UTC (Brasil = UTC-3). Minuto 7 para fugir do congestionamento
-# do topo da hora (o cron do GitHub Actions pode atrasar/pular no minuto 0).
+# Horarios em UTC (Brasil = UTC-3), gerados a partir dos mesmos defaults de
+# SCAN_HORARIOS/EXPLORE_HORARIO (voofacil/config.py) via
+# scripts/gerar_cron_actions.py — rode esse script e cole aqui de novo se
+# mudar os horarios no .env/config.py.
 on:
   schedule:
-    - cron: '7 9,15,0 * * *'   # 06:07, 12:07, 21:07 BRT  -> varredura padrao
-    - cron: '7 3 * * *'        # 00:07 BRT               -> busca ampla (explore)
+    - cron: '0 9 * * *'    # 06:00 BRT -> varredura padrao
+    - cron: '30 15 * * *'  # 12:30 BRT -> varredura padrao
+    - cron: '0 0 * * *'    # 21:00 BRT -> varredura padrao
+    - cron: '0 8 * * *'    # 05:00 BRT -> busca ampla (explore)
   workflow_dispatch:            # botao "Run workflow" para disparo manual/teste
 
 # Evita duas rodadas simultaneas se uma demorar
@@ -49,7 +53,7 @@ jobs:
         run: |
           # github.event.schedule = string do cron que disparou (vazio no manual).
           # O cron da busca ampla roda o explore; os demais (e o disparo manual) fazem a varredura padrao.
-          if [ "${{ github.event.schedule }}" = "7 3 * * *" ]; then
+          if [ "${{ github.event.schedule }}" = "0 8 * * *" ]; then
             python -m voofacil.worker --once-explore
           else
             python -m voofacil.worker --once

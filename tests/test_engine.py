@@ -107,8 +107,12 @@ def test_baseline_sem_historico_retorna_none(session):
 
 
 def test_executar_varredura_persiste_por_watch(session):
-    w1 = _watch(session)
-    w2 = _watch(session, nome="GRU -> MAD", destino_iata="MAD")
+    # ida_volta=False: o _quote() daqui não seta data_volta — sem isso,
+    # atende_criterios (integrado em executar_varredura) descartaria as
+    # quotes pelo default ida_volta=True do Watch (este teste cobre o fluxo
+    # de persistência, não critérios de ida/volta).
+    w1 = _watch(session, ida_volta=False)
+    w2 = _watch(session, nome="GRU -> MAD", destino_iata="MAD", ida_volta=False)
     provider = FakeProvider([_quote("3100"), _quote("2990", dia=15)])
 
     resultado = executar_varredura(session, providers=[provider])
@@ -130,7 +134,8 @@ def test_executar_varredura_ignora_watch_inativo(session):
 
 
 def test_provider_quebrado_nao_derruba_varredura(session):
-    w = _watch(session)
+    # ida_volta=False: ver comentário em test_executar_varredura_persiste_por_watch
+    w = _watch(session, ida_volta=False)
     bom = FakeProvider([_quote("3100")])
 
     resultado = executar_varredura(session, providers=[ExplodingProvider(), bom])
@@ -140,7 +145,8 @@ def test_provider_quebrado_nao_derruba_varredura(session):
 
 
 def test_varredura_gera_candidato_abaixo_do_limite(session):
-    w = _watch(session, preco_limite=Decimal("3000"))
+    # ida_volta=False: ver comentário em test_executar_varredura_persiste_por_watch
+    w = _watch(session, preco_limite=Decimal("3000"), ida_volta=False)
     provider = FakeProvider([_quote("2890")])
 
     resultado = executar_varredura(session, providers=[provider])

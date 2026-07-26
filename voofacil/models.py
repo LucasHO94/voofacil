@@ -53,6 +53,12 @@ class Gatilho(str, enum.Enum):
     ERROR_FARE = "ERROR_FARE"      # <= 50% do baseline — prioridade máxima
 
 
+class TipoData(str, enum.Enum):
+    EXATA = "EXATA"                # a data precisa bater exatamente
+    APROXIMADA = "APROXIMADA"      # tolerância de flexibilidade_dias em torno da data
+    INTERVALO = "INTERVALO"        # qualquer data dentro de [ini, fim]
+
+
 class Watch(Base):
     __tablename__ = "watch"
 
@@ -65,10 +71,18 @@ class Watch(Base):
     arrival_area_id: Mapped[str | None] = mapped_column(String(40))   # kgmid Google Explore (ex.: /m/02j9z = Europa)
     data_ini: Mapped[date]                                            # janela de embarque
     data_fim: Mapped[date]
+    tipo_data_ida: Mapped[str] = mapped_column(String(10), default=TipoData.INTERVALO.value)
+    tipo_data_volta: Mapped[str] = mapped_column(String(10), default=TipoData.INTERVALO.value)
+    flexibilidade_dias: Mapped[int | None]                            # tolerância p/ tipo_data_*='APROXIMADA'
+    data_volta_ini: Mapped[date | None]                               # janela de desembarque (independente da ida)
+    data_volta_fim: Mapped[date | None]
+    mes_especifico: Mapped[int | None]                                # 1-12; se setado, restringe a esse mês
     ida_volta: Mapped[bool] = mapped_column(Boolean, default=True)
     duracao_min: Mapped[int | None]                                   # noites mínimas (ida_volta)
     duracao_max: Mapped[int | None]
-    preco_limite: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    preco_limite: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))   # teto/máximo
+    preco_minimo: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))   # piso de preço
+    preco_aproximado: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))  # preço-alvo informativo
     moeda: Mapped[str] = mapped_column(String(3), default="BRL")
     ativo: Mapped[bool] = mapped_column(Boolean, default=True)
     criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -81,6 +95,18 @@ class Watch(Base):
         CheckConstraint(
             "(tipo = 'ROTA' AND destino_iata IS NOT NULL) OR tipo = 'REGIAO'",
             name="ck_watch_destino",
+        ),
+        CheckConstraint(
+            "tipo_data_ida IN ('EXATA','APROXIMADA','INTERVALO')",
+            name="ck_watch_tipo_data_ida",
+        ),
+        CheckConstraint(
+            "tipo_data_volta IN ('EXATA','APROXIMADA','INTERVALO')",
+            name="ck_watch_tipo_data_volta",
+        ),
+        CheckConstraint(
+            "mes_especifico IS NULL OR (mes_especifico BETWEEN 1 AND 12)",
+            name="ck_watch_mes_especifico",
         ),
     )
 

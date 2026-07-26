@@ -8,6 +8,7 @@ from voofacil.models import (
     FonteSnapshot,
     Gatilho,
     PriceSnapshot,
+    TipoData,
     TipoWatch,
     Watch,
 )
@@ -36,6 +37,49 @@ def test_watch_rota_persiste_e_destinos(session):
     assert w.destinos == ["LIS"]
     assert w.moeda == "BRL"
     assert w.ativo is True
+
+
+def test_watch_criterios_avancados_defaults(session):
+    """Campos novos são opcionais: default preserva o comportamento atual (INTERVALO)."""
+    w = _watch_rota()
+    session.add(w)
+    session.commit()
+
+    assert w.tipo_data_ida == TipoData.INTERVALO.value
+    assert w.tipo_data_volta == TipoData.INTERVALO.value
+    assert w.flexibilidade_dias is None
+    assert w.data_volta_ini is None
+    assert w.data_volta_fim is None
+    assert w.mes_especifico is None
+    assert w.preco_minimo is None
+    assert w.preco_aproximado is None
+
+
+def test_watch_criterios_avancados_persiste(session):
+    w = _watch_rota(
+        tipo_data_ida=TipoData.APROXIMADA.value,
+        tipo_data_volta=TipoData.EXATA.value,
+        flexibilidade_dias=3,
+        data_volta_ini=date(2026, 9, 20),
+        data_volta_fim=date(2026, 9, 20),
+        mes_especifico=9,
+        preco_minimo=Decimal("1500.00"),
+        preco_aproximado=Decimal("2800.00"),
+    )
+    session.add(w)
+    session.commit()
+    session.refresh(w)
+
+    assert w.tipo_data_ida == "APROXIMADA"
+    assert w.tipo_data_volta == "EXATA"
+    assert w.flexibilidade_dias == 3
+    assert w.data_volta_ini == date(2026, 9, 20)
+    assert w.data_volta_fim == date(2026, 9, 20)
+    assert w.mes_especifico == 9
+    assert isinstance(w.preco_minimo, Decimal)
+    assert w.preco_minimo == Decimal("1500.00")
+    assert isinstance(w.preco_aproximado, Decimal)
+    assert w.preco_aproximado == Decimal("2800.00")
 
 
 def test_watch_regiao_lista_destinos(session):

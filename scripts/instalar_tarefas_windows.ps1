@@ -8,6 +8,13 @@
     um processo Python ligado o tempo todo (mais robusto que o modo daemon
     do worker.py em uma maquina Windows que pode dormir/reiniciar).
 
+    Os horarios NAO sao mais fixos neste script: sao lidos em runtime de
+    voofacil/config.py (settings.scan_horarios e settings.explore_horario,
+    configuraveis via .env) atraves do Python do venv do projeto. Para
+    aumentar/diminuir a quantidade de horarios de varredura, edite
+    SCAN_HORARIOS no .env e rode este script de novo (ele recria as tarefas
+    do zero a cada execucao).
+
     Por padrao roda em modo "somente quando o usuario estiver conectado"
     (sem senha, sem privilegio de admin). Passe -RodarDesconectado para criar
     com "executar estando o usuario conectado ou nao" (pede senha e requer
@@ -29,12 +36,42 @@ $RaizProjeto = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $RaizProjeto ".venv\Scripts\python.exe"
 $PastaTarefas = "VooFacil"
 
-$Tarefas = @(
-    @{ Nome = "VooFacil-Varredura-0600"; Hora = "06:00"; Args = "-m voofacil.worker --once" }
-    @{ Nome = "VooFacil-Varredura-1230"; Hora = "12:30"; Args = "-m voofacil.worker --once" }
-    @{ Nome = "VooFacil-Varredura-2100"; Hora = "21:00"; Args = "-m voofacil.worker --once" }
-    @{ Nome = "VooFacil-Explore-0500";   Hora = "05:00"; Args = "-m voofacil.worker --once-explore" }
-)
+if (-not (Test-Path $Python)) {
+    Write-Error "venv nao encontrado em $Python. Rode primeiro: python -m venv .venv && .venv\Scripts\pip install -e .[dev]"
+}
+
+function Obter-HorariosCsv {
+    <#
+        Chama o Python do venv do projeto para ler settings.<Atributo> em
+        runtime (voofacil.config.settings + voofacil.schedule_utils.parse_horarios)
+        e devolve a lista de horarios "HH:MM" ja validada/normalizada. E isso
+        que torna a lista de tarefas dinamica: muda o .env, roda o script de
+        novo, sem precisar editar este arquivo.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Atributo
+    )
+
+    $codigoPython = "from voofacil.config import settings; from voofacil.schedule_utils import parse_horarios; print(','.join(f'{h:02d}:{m:02d}' for h,m in parse_horarios(settings.$Atributo)))"
+    $saida = & $Python -c $codigoPython
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($saida)) {
+        Write-Error "Falha ao ler settings.$Atributo via Python (venv em $Python). Confira o .env / voofacil/config.py."
+    }
+    return ($saida.Trim() -split ",")
+}
+
+$HorariosVarredura = Obter-HorariosCsv -Atributo "scan_horarios"
+$HorariosExplore = Obter-HorariosCsv -Atributo "explore_horario"
+
+$Tarefas = @()
+foreach ($hora in $HorariosVarredura) {
+    $sufixo = $hora -replace ":", ""
+    $Tarefas += @{ Nome = "VooFacil-Varredura-$sufixo"; Hora = $hora; Args = "-m voofacil.worker --once" }
+}
+foreach ($hora in $HorariosExplore) {
+    $sufixo = $hora -replace ":", ""
+    $Tarefas += @{ Nome = "VooFacil-Explore-$sufixo"; Hora = $hora; Args = "-m voofacil.worker --once-explore" }
+}
 
 if ($Remover) {
     foreach ($t in $Tarefas) {
@@ -45,10 +82,6 @@ if ($Remover) {
         }
     }
     exit 0
-}
-
-if (-not (Test-Path $Python)) {
-    Write-Error "venv nao encontrado em $Python. Rode primeiro: python -m venv .venv && .venv\Scripts\pip install -e .[dev]"
 }
 
 foreach ($t in $Tarefas) {

@@ -49,7 +49,17 @@ def _migrar_sqlite() -> None:
     from sqlalchemy import text
 
     colunas_novas = {
-        "watch": [("arrival_area_id", "VARCHAR(40)")],
+        "watch": [
+            ("arrival_area_id", "VARCHAR(40)"),
+            ("tipo_data_ida", "VARCHAR(10)"),
+            ("tipo_data_volta", "VARCHAR(10)"),
+            ("flexibilidade_dias", "INTEGER"),
+            ("data_volta_ini", "DATE"),
+            ("data_volta_fim", "DATE"),
+            ("mes_especifico", "INTEGER"),
+            ("preco_minimo", "NUMERIC(12,2)"),
+            ("preco_aproximado", "NUMERIC(12,2)"),
+        ],
     }
     with engine.begin() as conn:
         for tabela, colunas in colunas_novas.items():

@@ -17,6 +17,18 @@ def listar_watches(session) -> list[Watch]:
 def criar_watch_rota(
     session, nome: str, origem: str, destino: str,
     data_ini: date, data_fim: date, preco_limite: Decimal | None,
+    *,
+    ida_volta: bool = True,
+    duracao_min: int | None = None,
+    duracao_max: int | None = None,
+    tipo_data_ida: str = "INTERVALO",
+    tipo_data_volta: str = "INTERVALO",
+    flexibilidade_dias: int | None = None,
+    data_volta_ini: date | None = None,
+    data_volta_fim: date | None = None,
+    mes_especifico: int | None = None,
+    preco_minimo: Decimal | None = None,
+    preco_aproximado: Decimal | None = None,
 ) -> Watch:
     w = Watch(
         nome=nome,
@@ -26,6 +38,17 @@ def criar_watch_rota(
         data_ini=data_ini,
         data_fim=data_fim,
         preco_limite=preco_limite,
+        ida_volta=ida_volta,
+        duracao_min=duracao_min,
+        duracao_max=duracao_max,
+        tipo_data_ida=tipo_data_ida,
+        tipo_data_volta=tipo_data_volta,
+        flexibilidade_dias=flexibilidade_dias,
+        data_volta_ini=data_volta_ini,
+        data_volta_fim=data_volta_fim,
+        mes_especifico=mes_especifico,
+        preco_minimo=preco_minimo,
+        preco_aproximado=preco_aproximado,
     )
     session.add(w)
     session.commit()
@@ -36,6 +59,18 @@ def criar_watch_regiao(
     session, nome: str, origem: str, destinos: list[str],
     data_ini: date, data_fim: date, preco_limite: Decimal | None,
     arrival_area_id: str | None = None,
+    *,
+    ida_volta: bool = True,
+    duracao_min: int | None = None,
+    duracao_max: int | None = None,
+    tipo_data_ida: str = "INTERVALO",
+    tipo_data_volta: str = "INTERVALO",
+    flexibilidade_dias: int | None = None,
+    data_volta_ini: date | None = None,
+    data_volta_fim: date | None = None,
+    mes_especifico: int | None = None,
+    preco_minimo: Decimal | None = None,
+    preco_aproximado: Decimal | None = None,
 ) -> Watch:
     w = Watch(
         nome=nome,
@@ -47,6 +82,17 @@ def criar_watch_regiao(
         data_ini=data_ini,
         data_fim=data_fim,
         preco_limite=preco_limite,
+        ida_volta=ida_volta,
+        duracao_min=duracao_min,
+        duracao_max=duracao_max,
+        tipo_data_ida=tipo_data_ida,
+        tipo_data_volta=tipo_data_volta,
+        flexibilidade_dias=flexibilidade_dias,
+        data_volta_ini=data_volta_ini,
+        data_volta_fim=data_volta_fim,
+        mes_especifico=mes_especifico,
+        preco_minimo=preco_minimo,
+        preco_aproximado=preco_aproximado,
     )
     session.add(w)
     session.commit()

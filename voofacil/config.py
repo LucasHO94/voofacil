@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     fator_error_fare: float = 0.5     # preço <= 50% do baseline => error fare
     serpapi_orcamento_mes: int = 250  # free tier
 
+    # Agendamento das varreduras (configurável — ver voofacil/schedule_utils.py)
+    # Padrão espalhado (madrugada/meio-dia/noite): não há evidência forte de que
+    # UMA hora do dia tenha preço menor — o que a pesquisa confirma é que dia da
+    # semana e antecedência da compra importam mais. O espalhamento aqui serve
+    # pra fisgar quedas de preço ao longo do dia, não para acertar hora mágica.
+    scan_horarios: str = "06:00,12:30,21:00"   # CSV "HH:MM,HH:MM,..."
+    scan_dias_semana: str = "*"                 # "*"=todos; ou CSV "mon,tue,wed,thu,fri,sat,sun"
+    explore_horario: str = "05:00"              # busca ampla (SerpApi Explore), 1x/dia
+
     @property
     def sqlalchemy_url(self) -> str:
         if self.database_url:

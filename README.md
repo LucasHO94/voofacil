@@ -86,6 +86,44 @@ Veja/gerencie em `taskschd.msc` → pasta `VooFacil`.
 Use esta opção se preferir manter um terminal/serviço próprio ligado (ex.:
 numa VPS Linux com `systemd`/`screen`, em vez do Task Scheduler do Windows).
 
+### Mudando os horários (local e nuvem)
+
+Os horários da varredura são configuráveis via `.env`, não mais fixos no
+código:
+
+```bash
+# .env
+SCAN_HORARIOS=06:00,12:30,21:00   # CSV "HH:MM,HH:MM,..." — quantos quiser
+SCAN_DIAS_SEMANA=*                 # "*"=todos os dias, ou "mon,tue,wed,thu,fri"
+EXPLORE_HORARIO=05:00              # busca ampla (SerpApi Explore), 1x/dia
+```
+
+O padrão (madrugada/meio-dia/noite) só reflete um espalhamento ao longo do
+dia — **não há evidência forte de que uma hora específica tenha preço
+menor**. A pesquisa que embasou este projeto indica que dia da semana e
+antecedência da compra pesam mais do que a hora exata da busca; o
+espalhamento serve pra fisgar quedas de preço que aparecem/somem ao longo do
+dia e para não concentrar todas as chamadas de API no mesmo horário.
+
+- **Local (Opção A ou B acima)**: é 100% dinâmico — o worker (`daemon`) e o
+  `instalar_tarefas_windows.ps1` leem `SCAN_HORARIOS`/`SCAN_DIAS_SEMANA`/
+  `EXPLORE_HORARIO` em runtime. Depois de editar o `.env`, reinicie o worker
+  daemon ou rode de novo `.\scripts\instalar_tarefas_windows.ps1` (ele recria
+  as tarefas do zero, uma por horário retornado — não precisa mais editar o
+  `.ps1`).
+- **Nuvem (GitHub Actions)**: o `on: schedule: cron` do `worker.yml` é YAML
+  **estático** — o GitHub lê esse arquivo na hora de agendar, não em tempo de
+  execução, então não dá pra apontar isso pro `.env` e deixar 100% dinâmico.
+  Para ajustar a automação da nuvem, gere as linhas de cron (já convertidas
+  de BRT para UTC) a partir da mesma config e cole no `worker.yml`:
+  ```bash
+  .venv\Scripts\python scripts\gerar_cron_actions.py
+  ```
+  Copie a saída para dentro do bloco `on: schedule:` em
+  `.github/workflows/worker.yml`, substituindo as linhas `- cron: ...`
+  atuais, e confira se o `if` do step "Rodar varredura" ainda compara
+  corretamente com o cron do explore (o script já avisa isso na saída).
+
 ## 4. Como funciona a detecção de "bom preço"
 
 Camadas avaliadas em ordem (a primeira que disparar vence):

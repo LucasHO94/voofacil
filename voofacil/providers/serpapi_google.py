@@ -13,12 +13,14 @@ ContadorApi (tabela `contador_api`) — ver orcamento.py.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import httpx
 
 from voofacil.config import settings
+from voofacil.engine.orcamento import ha_orcamento, registrar_chamada
+from voofacil.models import TipoData, TipoWatch, Watch
 from voofacil.schemas import PriceQuote
 
 log = logging.getLogger(__name__)
@@ -37,6 +39,23 @@ def _parse_price_insights_date(valor: str | None) -> date | None:
         return datetime.strptime(valor, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def _data_alvo(tipo: str | None, ini: date, fim: date | None) -> date:
+    """Uma única data representativa de uma janela [ini, fim] — usada pelo
+    sweep() de ROTA para gastar só 1 chamada de cota por watch/varredura.
+
+    - EXATA/APROXIMADA: o próprio alvo do watch já é `ini` (a data única
+      que o usuário quer) — buscar outra data desperdiçaria a chamada com
+      um resultado que `atende_criterios` provavelmente descartaria.
+    - INTERVALO (ou `fim` ausente/inválido): usa o MEIO da janela, um proxy
+      melhor da faixa de preço típica do que a borda inicial.
+    """
+    if tipo in (TipoData.EXATA.value, TipoData.APROXIMADA.value):
+        return ini
+    if fim is None or fim <= ini:
+        return ini
+    return ini + (fim - ini) // 2
 
 
 class SerpApiProvider:
@@ -145,3 +164,73 @@ class SerpApiProvider:
                 )
             )
         return quotes
+
+    # ---------- Contrato Provider (varredura multi-fonte) ----------
+
+    def sweep(self, watch: Watch, session=None) -> list[PriceQuote]:
+        """Varredura regular (não só confirmação) para watches tipo ROTA.
+
+        Contexto: até aqui a SerpApi só era chamada para (a) CONFIRMAR um
+        candidato já aprovado pelo detector no cache da Travelpayouts e
+        (b) o Explore diário de busca ampla. Este método a inclui também na
+        varredura 3x/dia "estilo Skyscanner": para watches ROTA, busca o
+        Google Flights ao vivo NA MESMA rodada da Travelpayouts, dando ao
+        usuário duas fontes independentes lado a lado (TP_CACHE + SERPAPI).
+        Watches REGIAO são ignorados aqui — a busca ampla deles já é
+        coberta pelo Explore diário (executar_explore em worker.py).
+
+        Cota: só 1 chamada por watch/varredura, não 1 por dia da janela —
+        3 varreduras/dia x N dias de janela estouraria o free tier de
+        250/mês em poucos watches. A data usada é escolhida por
+        `_data_alvo` (ver docstring lá): a própria data-alvo do watch
+        quando EXATA/APROXIMADA, ou o meio da janela quando INTERVALO.
+        A data de volta segue a mesma lógica sobre a janela de desembarque
+        (data_volta_ini/fim) quando ela existe; senão é derivada de
+        duracao_min (ou 7 noites, default) a partir da data de ida escolhida.
+
+        `session` é opcional: o contrato genérico `Provider.sweep(watch)`
+        (usado por `executar_varredura` em worker.py) não passa sessão.
+        Quando chamada assim, abre uma sessão própria de curta duração só
+        para checar/gravar o orçamento (ContadorApi) e a fecha ao final;
+        passar uma sessão explicitamente (como fazem os testes) reaproveita
+        a mesma transação do chamador.
+        """
+        if watch.tipo != TipoWatch.ROTA.value or not watch.destino_iata:
+            return []
+        if not self.configurado:
+            return []
+
+        data_ida = _data_alvo(watch.tipo_data_ida, watch.data_ini, watch.data_fim)
+        data_volta = None
+        if watch.ida_volta:
+            if watch.data_volta_ini is not None:
+                data_volta = _data_alvo(
+                    watch.tipo_data_volta, watch.data_volta_ini, watch.data_volta_fim
+                )
+            else:
+                noites = watch.duracao_min or watch.duracao_max or 7
+                data_volta = data_ida + timedelta(days=noites)
+
+        sessao_propria = session is None
+        if sessao_propria:
+            from voofacil.db import SessionLocal  # import tardio — evita custo/efeito no import do módulo
+
+            session = SessionLocal()
+        try:
+            if not ha_orcamento(session, self.nome, settings.serpapi_orcamento_mes):
+                log.info("Orçamento SerpApi esgotado — sweep de rota pulado (watch %s)", watch.id)
+                return []
+            try:
+                quote = self.confirmar_google_flights(
+                    watch.origem_iata, watch.destino_iata, data_ida, data_volta
+                )
+                registrar_chamada(session, self.nome)
+            except Exception:  # noqa: BLE001 — 1 falha no sweep multi-fonte não derruba a varredura
+                log.exception("Falha no sweep SerpApi (varredura regular) do watch %s", watch.id)
+                return []
+            if sessao_propria:
+                session.commit()
+            return [quote] if quote else []
+        finally:
+            if sessao_propria:
+                session.close()

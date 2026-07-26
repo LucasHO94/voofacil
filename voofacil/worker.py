@@ -22,19 +22,22 @@ from voofacil.config import settings
 from voofacil.db import SessionLocal, init_db
 from voofacil.engine.confirmacao import confirmar_candidatos
 from voofacil.engine.detector import avaliar_snapshot
+from voofacil.engine.filtros import atende_criterios, atende_criterios_descoberta
 from voofacil.engine.orcamento import ha_orcamento, registrar_chamada
 from voofacil.engine.store import persistir_quotes
 from voofacil.models import TipoWatch, Watch
 from voofacil.providers.base import Provider
 from voofacil.providers.serpapi_google import SerpApiProvider
 from voofacil.providers.travelpayouts import TravelpayoutsProvider
+from voofacil.schedule_utils import dias_semana_apscheduler, parse_horarios
 from voofacil.schemas import Candidato
 
 log = logging.getLogger("voofacil.worker")
 
-# Horários das varreduras diárias (hora local) — espalhados p/ fisgar quedas
-HORARIOS_VARREDURA = ["06:00", "12:30", "21:00"]
-HORARIO_EXPLORE = "05:00"          # busca ampla (SerpApi Explore), 1x/dia — antes das varreduras
+# Horários de varredura/explore agora vêm de settings.scan_horarios /
+# settings.scan_dias_semana / settings.explore_horario (voofacil/config.py),
+# lidos dinamicamente dentro de main() via voofacil.schedule_utils — nada
+# mais fica hardcoded aqui (ver histórico do arquivo para os valores antigos).
 JITTER_SEGUNDOS = 900  # +/- 15 min para não bater sempre no mesmo horário
 MESES_EXPLORE_A_FRENTE = 3         # quantos meses da janela do watch explorar por dia
 
@@ -64,6 +67,7 @@ def executar_varredura(session, providers: list[Provider]) -> ResultadoVarredura
             except Exception:  # noqa: BLE001 — um provider caído não derruba o resto
                 log.exception("Provider %s falhou no watch %s", provider.nome, watch.id)
                 continue
+            quotes = [q for q in quotes if atende_criterios(watch, q)]
             novos = persistir_quotes(session, watch, quotes)
             total += len(novos)
             for snap in novos:
@@ -75,11 +79,30 @@ def executar_varredura(session, providers: list[Provider]) -> ResultadoVarredura
     return resultado
 
 
+def _providers_padrao(session, serpapi: SerpApiProvider | None = None) -> list[Provider]:
+    """Providers usados na varredura regular (3x/dia).
+
+    A Travelpayouts (cache) é sempre incluída — é a fonte barata/de volume.
+    A SerpApi (Google Flights) entra também quando está configurada (API
+    key presente) E há orçamento mensal disponível — dando ao usuário, para
+    watches ROTA, uma segunda cotação AO VIVO na MESMA varredura ("estilo
+    Skyscanner": duas fontes independentes lado a lado). Antes desta
+    integração, a SerpApi só era usada para confirmar candidatos já
+    aprovados pelo detector e no Explore diário — ver SerpApiProvider.sweep().
+    `serpapi` é injetável para testes.
+    """
+    providers: list[Provider] = [TravelpayoutsProvider()]
+    serpapi = serpapi or SerpApiProvider()
+    if serpapi.configurado and ha_orcamento(session, serpapi.nome, settings.serpapi_orcamento_mes):
+        providers.append(serpapi)
+    return providers
+
+
 def job_varredura() -> None:
     """Job agendado: sessão própria, commit no fim, erros logados."""
     with SessionLocal() as session:
         try:
-            resultado = executar_varredura(session, providers=[TravelpayoutsProvider()])
+            resultado = executar_varredura(session, providers=_providers_padrao(session))
             confirmados = confirmar_candidatos(session, resultado.candidatos)
             enviados = despachar(session, confirmados, canais_padrao())
             session.commit()
@@ -101,6 +124,15 @@ def _meses_a_frente(qtd: int, hoje: date | None = None) -> list[int]:
     return [((hoje.month - 1 + i) % 12) + 1 for i in range(qtd)]
 
 
+def _meses_para_explorar(watch: Watch, qtd: int, hoje: date | None = None) -> list[int]:
+    """Meses a varrer no Explore: só o mês do watch se mes_especifico estiver
+    setado (evita gastar orçamento SerpApi em meses que atende_criterios só
+    ia descartar depois); senão os próximos `qtd` meses, como antes."""
+    if watch.mes_especifico:
+        return [watch.mes_especifico]
+    return _meses_a_frente(qtd, hoje)
+
+
 def executar_explore(session, provider: SerpApiProvider) -> ResultadoVarredura:
     """Busca ampla diária: watches REGIAO com arrival_area_id via SerpApi Explore.
 
@@ -120,7 +152,7 @@ def executar_explore(session, provider: SerpApiProvider) -> ResultadoVarredura:
 
     for watch in watches:
         total = 0
-        for mes in _meses_a_frente(MESES_EXPLORE_A_FRENTE):
+        for mes in _meses_para_explorar(watch, MESES_EXPLORE_A_FRENTE):
             if not ha_orcamento(session, "SERPAPI", settings.serpapi_orcamento_mes):
                 log.warning("Orçamento SerpApi esgotado — explore do watch %s interrompido",
                             watch.id)
@@ -131,6 +163,7 @@ def executar_explore(session, provider: SerpApiProvider) -> ResultadoVarredura:
             except Exception:  # noqa: BLE001 — um mês/watch com falha não derruba o resto
                 log.exception("Falha no explore do watch %s (mes %s)", watch.id, mes)
                 continue
+            quotes = [q for q in quotes if atende_criterios_descoberta(watch, q)]
             novos = persistir_quotes(session, watch, quotes)
             total += len(novos)
             for snap in novos:
@@ -190,24 +223,30 @@ def main() -> None:
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
 
+    horarios = parse_horarios(settings.scan_horarios)
+    dias_semana = dias_semana_apscheduler(settings.scan_dias_semana)
+    hora_explore, minuto_explore = parse_horarios(settings.explore_horario)[0]
+
     scheduler = BlockingScheduler()
-    for horario in HORARIOS_VARREDURA:
-        hora, minuto = horario.split(":")
+    for hora, minuto in horarios:
         scheduler.add_job(
             job_varredura,
-            CronTrigger(hour=int(hora), minute=int(minuto), jitter=JITTER_SEGUNDOS),
-            id=f"varredura_{horario}",
+            CronTrigger(hour=hora, minute=minuto, day_of_week=dias_semana, jitter=JITTER_SEGUNDOS),
+            id=f"varredura_{hora:02d}{minuto:02d}",
             misfire_grace_time=3600,
         )
-    hora, minuto = HORARIO_EXPLORE.split(":")
     scheduler.add_job(
         job_explore,
-        CronTrigger(hour=int(hora), minute=int(minuto), jitter=JITTER_SEGUNDOS),
+        CronTrigger(hour=hora_explore, minute=minuto_explore, day_of_week=dias_semana,
+                    jitter=JITTER_SEGUNDOS),
         id="explore_diario",
         misfire_grace_time=3600,
     )
-    log.info("Worker agendado: varreduras %s + explore %s (jitter +/-%smin). Ctrl+C para sair.",
-             ", ".join(HORARIOS_VARREDURA), HORARIO_EXPLORE, JITTER_SEGUNDOS // 60)
+    log.info(
+        "Worker agendado: varreduras %s + explore %02d:%02d (dias=%s, jitter +/-%smin). Ctrl+C para sair.",
+        ", ".join(f"{h:02d}:{m:02d}" for h, m in horarios),
+        hora_explore, minuto_explore, dias_semana, JITTER_SEGUNDOS // 60,
+    )
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
