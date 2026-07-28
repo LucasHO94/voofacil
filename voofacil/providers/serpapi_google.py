@@ -62,7 +62,7 @@ class SerpApiProvider:
     nome = "SERPAPI"
 
     def __init__(self, api_key: str | None = None, client: httpx.Client | None = None):
-        self.api_key = api_key or settings.serpapi_key
+        self.api_key = api_key if api_key is not None else settings.serpapi_key
         self._client = client or httpx.Client(timeout=httpx.Timeout(30.0))
 
     @property

@@ -23,8 +23,8 @@ class TelegramChannel:
 
     def __init__(self, token: str | None = None, chat_id: str | None = None,
                  client: httpx.Client | None = None):
-        self.token = token or settings.telegram_token
-        self.chat_id = chat_id or settings.telegram_chat_id
+        self.token = token if token is not None else settings.telegram_token
+        self.chat_id = chat_id if chat_id is not None else settings.telegram_chat_id
         self._client = client or httpx.Client(base_url=API_URL, timeout=15.0)
 
     @property

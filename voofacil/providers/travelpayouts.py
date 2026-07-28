@@ -84,7 +84,7 @@ class TravelpayoutsProvider:
     nome = "TP_CACHE"
 
     def __init__(self, token: str | None = None, client: httpx.Client | None = None):
-        self.token = token or settings.tp_token
+        self.token = token if token is not None else settings.tp_token
         self._client = client or httpx.Client(
             base_url=BASE_URL,
             timeout=httpx.Timeout(20.0),

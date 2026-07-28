@@ -1,0 +1,20 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "voofacil-streamlit",
+      "runtimeExecutable": "C:\\dev\\voofacil\\.venv\\Scripts\\streamlit.exe",
+      "runtimeArgs": [
+        "run",
+        "C:\\dev\\voofacil\\voofacil\\app\\Painel.py",
+        "--server.port",
+        "8502",
+        "--server.headless",
+        "true",
+        "--browser.gatherUsageStats",
+        "false"
+      ],
+      "port": 8502
+    }
+  ]
+}

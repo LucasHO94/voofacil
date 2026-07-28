@@ -35,11 +35,11 @@ class EmailChannel:
     def __init__(self, host: str | None = None, port: int | None = None,
                  user: str | None = None, password: str | None = None,
                  destinatario: str | None = None):
-        self.host = host or settings.smtp_host
-        self.port = port or settings.smtp_port
-        self.user = user or settings.smtp_user
-        self.password = password or settings.smtp_password
-        self.destinatario = destinatario or settings.alert_email_to
+        self.host = host if host is not None else settings.smtp_host
+        self.port = port if port is not None else settings.smtp_port
+        self.user = user if user is not None else settings.smtp_user
+        self.password = password if password is not None else settings.smtp_password
+        self.destinatario = destinatario if destinatario is not None else settings.alert_email_to
 
     @property
     def configurado(self) -> bool:
