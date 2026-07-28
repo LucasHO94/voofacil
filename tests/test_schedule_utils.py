@@ -1,12 +1,8 @@
-"""Testes de voofacil/schedule_utils.py — parsing de horários, validação de
-dias da semana e geração das linhas de cron (UTC) para o GitHub Actions."""
+"""Testes de voofacil/schedule_utils.py — parsing de horários e validação de
+dias da semana (usados como seed do agendamento dinâmico em banco)."""
 import pytest
 
-from voofacil.schedule_utils import (
-    dias_semana_apscheduler,
-    gerar_cron_actions,
-    parse_horarios,
-)
+from voofacil.schedule_utils import dias_semana_apscheduler, parse_horarios
 
 
 class TestParseHorarios:
@@ -74,51 +70,3 @@ class TestDiasSemanaApscheduler:
     def test_none_levanta_value_error(self):
         with pytest.raises(ValueError):
             dias_semana_apscheduler(None)
-
-
-class TestGerarCronActions:
-    def test_formato_de_saida_e_quantidade_de_linhas(self):
-        linhas = gerar_cron_actions([(6, 0), (12, 30)], "*", (5, 0))
-        assert len(linhas) == 3  # 2 horários de varredura + 1 explore
-        for linha in linhas:
-            assert linha.startswith("- cron: '")
-            assert linha.endswith("'")
-
-    def test_conversao_brt_para_utc_sem_virada_de_dia(self):
-        # 06:00 BRT -> 09:00 UTC ; 12:30 BRT -> 15:30 UTC ; explore 05:00 -> 08:00
-        linhas = gerar_cron_actions([(6, 0), (12, 30)], "*", (5, 0))
-        assert linhas[0] == "- cron: '0 9 * * *'"
-        assert linhas[1] == "- cron: '30 15 * * *'"
-        assert linhas[2] == "- cron: '0 8 * * *'"
-
-    def test_virada_de_dia_21h_brt_vira_meia_noite_utc(self):
-        # 21:00 BRT -> 00:00 UTC do dia seguinte (o caso citado no contrato)
-        linhas = gerar_cron_actions([(21, 0)], "*", (5, 0))
-        assert linhas[0] == "- cron: '0 0 * * *'"
-
-    def test_virada_de_dia_desloca_o_dia_da_semana(self):
-        # segunda (mon) às 21:00 BRT cai terça (tue) de madrugada em UTC.
-        # cron POSIX: dom=0, seg=1, ter=2, ... -> terça = 2
-        linhas = gerar_cron_actions([(21, 0)], "mon", (5, 0))
-        assert linhas[0] == "- cron: '0 0 * * 2'"
-        # o explore, sem virada de dia, permanece segunda (1)
-        assert linhas[1] == "- cron: '0 8 * * 1'"
-
-    def test_virada_de_dia_com_multiplos_dias_da_semana(self):
-        # sexta/sábado/domingo às 22:00 BRT -> 01:00 UTC do dia seguinte;
-        # sex->sab(6), sab->dom(0), dom->seg(1)
-        linhas = gerar_cron_actions([(22, 0)], "fri,sat,sun", (5, 0))
-        assert linhas[0] == "- cron: '0 1 * * 0,1,6'"
-
-    def test_asterisco_nao_e_afetado_pela_virada_de_dia(self):
-        linhas = gerar_cron_actions([(23, 30)], "*", (5, 0))
-        assert linhas[0] == "- cron: '30 2 * * *'"
-
-    def test_horario_sem_madrugada_nao_desloca_dia(self):
-        # 20:59 BRT ainda não vira o dia em UTC (soma 3h e fica em 23:59 UTC)
-        linhas = gerar_cron_actions([(20, 59)], "mon", (5, 0))
-        assert linhas[0] == "- cron: '59 23 * * 1'"
-
-    def test_dias_semana_invalido_levanta_value_error(self):
-        with pytest.raises(ValueError):
-            gerar_cron_actions([(6, 0)], "segunda", (5, 0))

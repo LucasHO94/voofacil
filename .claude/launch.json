@@ -3,8 +3,10 @@
   "configurations": [
     {
       "name": "voofacil-streamlit",
-      "runtimeExecutable": "C:\\dev\\voofacil\\.venv\\Scripts\\streamlit.exe",
+      "runtimeExecutable": "C:\\dev\\voofacil\\.venv\\Scripts\\python.exe",
       "runtimeArgs": [
+        "-m",
+        "streamlit",
         "run",
         "C:\\dev\\voofacil\\voofacil\\app\\Painel.py",
         "--server.port",

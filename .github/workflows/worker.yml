@@ -1,16 +1,21 @@
 name: VooFacil Worker (varredura periodica)
 
 # Roda a varredura do VooFacil na nuvem, sem depender do PC do usuario.
-# Horarios em UTC (Brasil = UTC-3), gerados a partir dos mesmos defaults de
-# SCAN_HORARIOS/EXPLORE_HORARIO (voofacil/config.py) via
-# scripts/gerar_cron_actions.py — rode esse script e cole aqui de novo se
-# mudar os horarios no .env/config.py.
+#
+# Modelo (agendamento dinamico via banco, ver voofacil/engine/agendamento.py):
+# o GitHub Actions dispara este workflow a cada 15 minutos, SEMPRE (o cron
+# abaixo eh fixo/curto de proposito, nao precisa mudar quando o usuario troca
+# os horarios). A cada execucao, o worker roda em modo "--auto"
+# (voofacil.worker.job_auto): ele consulta o banco (tabela HorarioAgendado,
+# editavel na aba Agendamento do painel Streamlit) e decide sozinho, via
+# deve_rodar_agora(), se ha uma varredura e/ou um explore para rodar de
+# verdade agora - se nao houver, o job sai rapido sem gastar nenhuma chamada
+# de API. Ou seja: mudar os horarios agora eh so mexer no painel, sem tocar
+# neste arquivo. O repo eh publico, entao minutos de Actions sao ilimitados
+# (sem custo) mesmo rodando a cada 15 min o dia inteiro.
 on:
   schedule:
-    - cron: '0 9 * * *'    # 06:00 BRT -> varredura padrao
-    - cron: '30 15 * * *'  # 12:30 BRT -> varredura padrao
-    - cron: '0 0 * * *'    # 21:00 BRT -> varredura padrao
-    - cron: '0 8 * * *'    # 05:00 BRT -> busca ampla (explore)
+    - cron: '*/15 * * * *'
   workflow_dispatch:            # botao "Run workflow" para disparo manual/teste
 
 # Evita duas rodadas simultaneas se uma demorar
@@ -50,11 +55,4 @@ jobs:
           SMTP_PASSWORD:    ${{ secrets.SMTP_PASSWORD }}
           ALERT_EMAIL_TO:   ${{ secrets.SMTP_USER }}
           PYTHONPATH:       .
-        run: |
-          # github.event.schedule = string do cron que disparou (vazio no manual).
-          # O cron da busca ampla roda o explore; os demais (e o disparo manual) fazem a varredura padrao.
-          if [ "${{ github.event.schedule }}" = "0 8 * * *" ]; then
-            python -m voofacil.worker --once-explore
-          else
-            python -m voofacil.worker --once
-          fi
+        run: python -m voofacil.worker --auto

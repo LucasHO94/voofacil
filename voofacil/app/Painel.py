@@ -40,6 +40,17 @@ from voofacil.engine.queries import (
     historico_precos,
     listar_watches,
 )
+# NOTA: módulo criado por outro agente em paralelo (contrato combinado
+# previamente) — pode não existir ainda neste ambiente enquanto os dois
+# trabalham ao mesmo tempo; a integração final é verificada depois.
+from voofacil.engine.agendamento import (  # noqa: E402
+    alternar_ativo as alternar_ativo_horario,
+    atualizar_horario,
+    criar_horario,
+    excluir_horario,
+    garantir_horarios_padrao,
+    listar_horarios,
+)
 from voofacil.worker import _providers_padrao, executar_varredura
 from scripts.seed_watch import ARRIVAL_AREA_ID, REGIOES
 
@@ -369,8 +380,105 @@ def aba_alertas(session):
         )
 
 
+_TITULOS_TIPO_HORARIO = {
+    "VARREDURA": "🛫 Varredura regular",
+    "EXPLORE": "🌍 Busca ampla (Explore)",
+}
+
+
+def _secao_horarios(session, tipo: str) -> None:
+    """Lista/edita/exclui/adiciona horários de um `tipo` (VARREDURA ou EXPLORE).
+
+    Usa `voofacil.engine.agendamento` (contrato combinado com o outro agente)
+    para toda a lógica — este bloco é só UI, igual ao resto do arquivo.
+    """
+    st.markdown(f"#### {_TITULOS_TIPO_HORARIO.get(tipo, tipo)}")
+
+    horarios = listar_horarios(session, tipo, incluir_inativos=True)
+    if not horarios:
+        st.info("Nenhum horário cadastrado ainda.")
+
+    editando = st.session_state.get("agendamento_editando")
+
+    for h in horarios:
+        if editando == (tipo, h.id):
+            c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
+            nova_hora = c1.number_input(
+                "Hora", min_value=0, max_value=23, value=int(h.hora), step=1,
+                key=f"edit_hora_{tipo}_{h.id}",
+            )
+            novo_minuto = c2.number_input(
+                "Minuto", min_value=0, max_value=59, value=int(h.minuto), step=1,
+                key=f"edit_minuto_{tipo}_{h.id}",
+            )
+            if c3.button("✅", key=f"confirmar_edit_{tipo}_{h.id}"):
+                try:
+                    atualizar_horario(session, h.id, int(nova_hora), int(novo_minuto))
+                except ValueError as e:
+                    st.error(str(e))
+                else:
+                    st.session_state.agendamento_editando = None
+                    st.rerun()
+            if c4.button("❌", key=f"cancelar_edit_{tipo}_{h.id}"):
+                st.session_state.agendamento_editando = None
+                st.rerun()
+        else:
+            c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+            c1.markdown(
+                f"**{h.hora:02d}:{h.minuto:02d}**" + ("" if h.ativo else " 🔴 pausado")
+            )
+            if c2.button("✏️", key=f"editar_horario_{tipo}_{h.id}"):
+                st.session_state.agendamento_editando = (tipo, h.id)
+                st.rerun()
+            if c3.button("⏸️" if h.ativo else "▶️", key=f"toggle_horario_{tipo}_{h.id}"):
+                alternar_ativo_horario(session, h.id)
+                st.rerun()
+            if c4.button("🗑️", key=f"del_horario_{tipo}_{h.id}"):
+                excluir_horario(session, h.id)
+                st.rerun()
+
+    st.markdown("**Adicionar horário**")
+    with st.form(f"novo_horario_{tipo}", clear_on_submit=True):
+        ca, cb, cc = st.columns([2, 2, 1])
+        hora_nova = ca.number_input(
+            "Hora", min_value=0, max_value=23, value=6, step=1, key=f"add_hora_{tipo}",
+        )
+        minuto_novo = cb.number_input(
+            "Minuto", min_value=0, max_value=59, value=0, step=1, key=f"add_minuto_{tipo}",
+        )
+        if cc.form_submit_button("Adicionar horário", width="stretch"):
+            try:
+                criar_horario(session, tipo, int(hora_nova), int(minuto_novo))
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.success("Horário adicionado!")
+                st.rerun()
+
+
+def aba_agendamento(session):
+    st.subheader("Horários de varredura")
+    st.caption(
+        "⚠️ Mudanças aqui valem a partir da PRÓXIMA verificação do worker "
+        "(rodando a cada ~15 minutos na nuvem via GitHub Actions) — não é "
+        "instantâneo. O cron do GitHub Actions em si é fixo (dispara a cada "
+        "~15 min); o que muda dinamicamente, a partir do que você configura "
+        "aqui, é O QUE o worker decide fazer em cada execução."
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        _secao_horarios(session, "VARREDURA")
+    with col2:
+        _secao_horarios(session, "EXPLORE")
+
+
 def main() -> None:
     session = _session()
+
+    if not st.session_state.get("horarios_padrao_garantidos"):
+        garantir_horarios_padrao(session)
+        st.session_state.horarios_padrao_garantidos = True
 
     st.title("✈️ VooFácil — monitor de passagens aéreas")
     if st.sidebar.button("🔎 Varrer agora", type="primary", width="stretch"):
@@ -384,13 +492,17 @@ def main() -> None:
             f"{len(enviados)} alerta(s) enviado(s)"
         )
 
-    aba1, aba2, aba3 = st.tabs(["📋 Watches", "📈 Histórico", "🔔 Alertas"])
+    aba1, aba2, aba3, aba4 = st.tabs(
+        ["📋 Watches", "📈 Histórico", "🔔 Alertas", "⏰ Agendamento"]
+    )
     with aba1:
         aba_watches(session)
     with aba2:
         aba_historico(session)
     with aba3:
         aba_alertas(session)
+    with aba4:
+        aba_agendamento(session)
 
 
 main()

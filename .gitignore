@@ -26,3 +26,6 @@ htmlcov/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Logs locais (ex.: teste manual do painel)
+*.log

@@ -1,9 +1,22 @@
 """Worker do VooFacil — processo SEPARADO da UI Streamlit.
 
-Roda a varredura periódica (APScheduler, 3x/dia com jitter) ou uma única vez:
+Roda o agendamento DINÂMICO (via banco, editável pelo painel Streamlit) ou
+uma ação única/manual:
 
-    python -m voofacil.worker --once     # varre agora e sai (teste/manual)
-    python -m voofacil.worker            # daemon com agendamento
+    python -m voofacil.worker --once          # varredura agora e sai (teste/manual)
+    python -m voofacil.worker --once-explore  # busca ampla agora e sai (teste/manual)
+    python -m voofacil.worker --auto          # decide via banco (job_auto) e sai — usado pelo poll
+    python -m voofacil.worker                 # daemon: poll recorrente chamando job_auto()
+
+Antes, os horários (settings.scan_horarios/explore_horario, .env) eram fixos
+e agendados via CronTrigger direto no processo. Agora eles moram no banco
+(HorarioAgendado, ver voofacil/engine/agendamento.py) e tanto o daemon local
+quanto a nuvem (GitHub Actions, ver .github/workflows/worker.yml) fazem
+POLL de frequência fixa e curta (settings.agendamento_poll_minutos) chamando
+job_auto(), que decide internamente (deve_rodar_agora) se é hora de varrer
+e/ou explorar de verdade. --once/--once-explore continuam existindo tal
+qual antes, sem depender do banco, para teste manual e para o botão "Varrer
+agora" do painel.
 
 NUNCA importar/rodar isto dentro do Streamlit (a página re-executa a cada
 interação e criaria/mataria schedulers).
@@ -13,32 +26,37 @@ from __future__ import annotations
 import argparse
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 
 from voofacil.alerts.dispatcher import canais_padrao, despachar
 from voofacil.config import settings
 from voofacil.db import SessionLocal, init_db
+from voofacil.engine.agendamento import deve_rodar_agora, garantir_horarios_padrao
 from voofacil.engine.confirmacao import confirmar_candidatos
 from voofacil.engine.detector import avaliar_snapshot
 from voofacil.engine.filtros import atende_criterios, atende_criterios_descoberta
 from voofacil.engine.orcamento import ha_orcamento_serpapi, registrar_chamada_serpapi
 from voofacil.engine.store import persistir_quotes
-from voofacil.models import TipoWatch, Watch
+from voofacil.models import TipoHorario, TipoWatch, Watch
 from voofacil.providers.base import Provider
 from voofacil.providers.serpapi_google import SerpApiProvider
 from voofacil.providers.travelpayouts import TravelpayoutsProvider
-from voofacil.schedule_utils import dias_semana_apscheduler, parse_horarios
+from voofacil.schedule_utils import dias_semana_apscheduler
 from voofacil.schemas import Candidato
 
 log = logging.getLogger("voofacil.worker")
 
-# Horários de varredura/explore agora vêm de settings.scan_horarios /
-# settings.scan_dias_semana / settings.explore_horario (voofacil/config.py),
-# lidos dinamicamente dentro de main() via voofacil.schedule_utils — nada
-# mais fica hardcoded aqui (ver histórico do arquivo para os valores antigos).
-JITTER_SEGUNDOS = 900  # +/- 15 min para não bater sempre no mesmo horário
+# BRT = UTC-3 (Brasil não usa mais horário de verão desde 2019) — mesma
+# convenção de voofacil/engine/agendamento.py e voofacil/schedule_utils.py.
+_OFFSET_UTC_PARA_BRT_HORAS = 3
+# Ordem mon..sun == Python datetime.weekday() (Monday=0..Sunday=6) — usada só
+# para checar scan_dias_semana em _dia_permitido_hoje (a lista CSV vem de
+# voofacil.schedule_utils.dias_semana_apscheduler, que já valida o formato).
+_DIAS_PY_WEEKDAY = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+JITTER_SEGUNDOS = 60  # pequeno jitter no poll do daemon local (o poll já é frequente)
 MESES_EXPLORE_A_FRENTE = 3         # quantos meses da janela do watch explorar por dia
 
 
@@ -200,6 +218,68 @@ def job_explore() -> None:
             log.exception("Explore abortado")
 
 
+def _dia_permitido_hoje(agora_utc: datetime | None = None) -> bool:
+    """True se o dia de hoje (data BRT) está entre os dias permitidos por
+    `settings.scan_dias_semana` ("*" = todos os dias, ou CSV mon..sun).
+
+    `agora_utc` é opcional (default: `datetime.now(timezone.utc)`) — só
+    existe para permitir teste determinístico, mesmo padrão de
+    `deve_rodar_agora` em voofacil/engine/agendamento.py. Dia da semana
+    continua vindo do `.env` (não é editável pelo painel) — é a única parte
+    do agendamento antigo que segue estática de propósito.
+    """
+    dias = dias_semana_apscheduler(settings.scan_dias_semana)
+    if dias == "*":
+        return True
+
+    if agora_utc is None:
+        agora_utc = datetime.now(timezone.utc)
+    agora_brt = agora_utc - timedelta(hours=_OFFSET_UTC_PARA_BRT_HORAS)
+    dia_hoje = _DIAS_PY_WEEKDAY[agora_brt.weekday()]
+    return dia_hoje in dias.split(",")
+
+
+def job_auto(agora_utc: datetime | None = None) -> None:
+    """Job único do poll de frequência fixa (chamado a cada
+    `settings.agendamento_poll_minutos`, tanto pelo GitHub Actions quanto
+    pelo daemon local) — decide via banco se é hora de varrer e/ou explorar
+    agora, sem gastar nenhuma chamada de API quando não é.
+
+    As duas checagens (VARREDURA/EXPLORE) são independentes: se os horários
+    coincidirem, as duas disparam na mesma chamada. `garantir_horarios_padrao`
+    e `deve_rodar_agora` rodam numa sessão PRÓPRIA, só de leitura/seed, que é
+    fechada ANTES de chamar `job_varredura()`/`job_explore()` — essas duas
+    abrem cada uma a sua própria sessão internamente.
+
+    `agora_utc` é opcional (default: `datetime.now(timezone.utc)`) — só
+    existe para permitir teste determinístico (mesmo padrão de
+    `deve_rodar_agora`).
+    """
+    if agora_utc is None:
+        agora_utc = datetime.now(timezone.utc)
+
+    if not _dia_permitido_hoje(agora_utc):
+        log.info(
+            "Hoje não é dia permitido por scan_dias_semana=%s — nada agendado",
+            settings.scan_dias_semana,
+        )
+        return
+
+    with SessionLocal() as session:
+        garantir_horarios_padrao(session)
+        rodar_varredura = deve_rodar_agora(session, TipoHorario.VARREDURA.value, agora_utc)
+        rodar_explore = deve_rodar_agora(session, TipoHorario.EXPLORE.value, agora_utc)
+
+    if not rodar_varredura and not rodar_explore:
+        log.info("nada agendado para agora")
+        return
+
+    if rodar_varredura:
+        job_varredura()
+    if rodar_explore:
+        job_explore()
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -210,6 +290,9 @@ def main() -> None:
                         help="executa uma varredura única (Travelpayouts + confirmação) e sai")
     parser.add_argument("--once-explore", action="store_true",
                         help="executa uma rodada única de busca ampla (SerpApi Explore) e sai")
+    parser.add_argument("--auto", action="store_true",
+                        help="decide via banco (job_auto/deve_rodar_agora) se varre e/ou explora "
+                             "agora e sai — usado pelo poll do GitHub Actions/daemon local")
     args = parser.parse_args()
 
     init_db()
@@ -220,34 +303,26 @@ def main() -> None:
     if args.once_explore:
         job_explore()
         return
+    if args.auto:
+        job_auto()
+        return
 
     # Import tardio: APScheduler só é necessário no modo daemon
     from apscheduler.schedulers.blocking import BlockingScheduler
-    from apscheduler.triggers.cron import CronTrigger
-
-    horarios = parse_horarios(settings.scan_horarios)
-    dias_semana = dias_semana_apscheduler(settings.scan_dias_semana)
-    hora_explore, minuto_explore = parse_horarios(settings.explore_horario)[0]
+    from apscheduler.triggers.interval import IntervalTrigger
 
     scheduler = BlockingScheduler()
-    for hora, minuto in horarios:
-        scheduler.add_job(
-            job_varredura,
-            CronTrigger(hour=hora, minute=minuto, day_of_week=dias_semana, jitter=JITTER_SEGUNDOS),
-            id=f"varredura_{hora:02d}{minuto:02d}",
-            misfire_grace_time=3600,
-        )
     scheduler.add_job(
-        job_explore,
-        CronTrigger(hour=hora_explore, minute=minuto_explore, day_of_week=dias_semana,
-                    jitter=JITTER_SEGUNDOS),
-        id="explore_diario",
+        job_auto,
+        IntervalTrigger(minutes=settings.agendamento_poll_minutos, jitter=JITTER_SEGUNDOS),
+        id="poll_auto",
         misfire_grace_time=3600,
     )
     log.info(
-        "Worker agendado: varreduras %s + explore %02d:%02d (dias=%s, jitter +/-%smin). Ctrl+C para sair.",
-        ", ".join(f"{h:02d}:{m:02d}" for h, m in horarios),
-        hora_explore, minuto_explore, dias_semana, JITTER_SEGUNDOS // 60,
+        "Worker em modo poll: a cada %s min chama job_auto(), que decide via banco "
+        "(HorarioAgendado, editável pelo painel) se varre e/ou explora agora "
+        "(dias=%s vindo do .env, jitter +/-%ss). Ctrl+C para sair.",
+        settings.agendamento_poll_minutos, settings.scan_dias_semana, JITTER_SEGUNDOS,
     )
     try:
         scheduler.start()

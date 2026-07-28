@@ -66,63 +66,72 @@ Streamlit. Duas formas de operar, escolha uma:
 .\scripts\instalar_tarefas_windows.ps1
 ```
 
-Cria 4 tarefas agendadas (`VooFacil-Varredura-0600/1230/2100` e
-`VooFacil-Explore-0500`) rodando `python -m voofacil.worker --once` /
-`--once-explore` nos horários certos. Por padrão só rodam com você
-logado (sem senha, sem admin). Para rodar mesmo desconectado, use
-`-RodarDesconectado` (pede senha da sua conta e precisa de PowerShell
-como administrador). Para remover: `.\scripts\instalar_tarefas_windows.ps1 -Remover`.
+Cria **uma única** tarefa agendada (`VooFacil-Poll`) rodando
+`python -m voofacil.worker --auto` a cada `agendamento_poll_minutos` minutos
+(15 por padrão) indefinidamente. A cada execução o worker consulta o banco e
+decide sozinho se é hora de varrer e/ou explorar de verdade (ver "Mudando os
+horários" abaixo) — a tarefa em si nunca muda, só o banco. Por padrão só roda
+com você logado (sem senha, sem admin). Para rodar mesmo desconectado, use
+`-RodarDesconectado` (pede senha da sua conta e precisa de PowerShell como
+administrador). Para remover: `.\scripts\instalar_tarefas_windows.ps1 -Remover`.
 
 Veja/gerencie em `taskschd.msc` → pasta `VooFacil`.
 
 ### Opção B — Worker como daemon (rodar manualmente ou via serviço)
 
 ```bash
-.venv\Scripts\python -m voofacil.worker            # fica rodando, agenda interna (APScheduler)
-.venv\Scripts\python -m voofacil.worker --once      # varredura única, sai
-.venv\Scripts\python -m voofacil.worker --once-explore   # busca ampla única, sai
+.venv\Scripts\python -m voofacil.worker            # fica rodando: poll a cada agendamento_poll_minutos, chama job_auto()
+.venv\Scripts\python -m voofacil.worker --auto      # roda job_auto() uma vez (mesma decisão do poll) e sai
+.venv\Scripts\python -m voofacil.worker --once      # varredura única, sai (ignora o banco — sempre roda)
+.venv\Scripts\python -m voofacil.worker --once-explore   # busca ampla única, sai (idem)
 ```
 
 Use esta opção se preferir manter um terminal/serviço próprio ligado (ex.:
 numa VPS Linux com `systemd`/`screen`, em vez do Task Scheduler do Windows).
+`--once`/`--once-explore` continuam existindo tal qual antes — não dependem
+do banco nem do horário atual, servem para teste manual e para o botão
+"Varrer agora" do painel.
 
-### Mudando os horários (local e nuvem)
+### Mudando os horários
 
-Os horários da varredura são configuráveis via `.env`, não mais fixos no
-código:
+Os horários de varredura e de busca ampla (explore) agora são **editáveis
+direto no painel Streamlit, na aba Agendamento** — adicionar, remover,
+ativar/desativar e alterar hora/minuto não exige mexer em código nem
+reiniciar nada, tanto localmente quanto na nuvem (o painel e o worker
+compartilham o mesmo banco).
+
+O `.env` (`SCAN_HORARIOS`/`EXPLORE_HORARIO`) só serve de **semente inicial**:
+na primeira vez que o worker roda (`garantir_horarios_padrao`), se a tabela
+de horários estiver totalmente vazia para aquele tipo (VARREDURA ou
+EXPLORE), ela é populada a partir do `.env`. Depois disso o banco manda — se
+você apagar tudo de propósito pelo painel, não volta a semear sozinho.
 
 ```bash
-# .env
-SCAN_HORARIOS=06:00,12:30,21:00   # CSV "HH:MM,HH:MM,..." — quantos quiser
-SCAN_DIAS_SEMANA=*                 # "*"=todos os dias, ou "mon,tue,wed,thu,fri"
-EXPLORE_HORARIO=05:00              # busca ampla (SerpApi Explore), 1x/dia
+# .env — só usado para semear o banco na primeira execução
+SCAN_HORARIOS=06:00,12:30,21:00   # CSV "HH:MM,HH:MM,..." — seed inicial da VARREDURA
+SCAN_DIAS_SEMANA=*                 # "*"=todos os dias, ou "mon,tue,wed,thu,fri" (NÃO editável pelo painel)
+EXPLORE_HORARIO=05:00              # seed inicial do EXPLORE
 ```
 
-O padrão (madrugada/meio-dia/noite) só reflete um espalhamento ao longo do
-dia — **não há evidência forte de que uma hora específica tenha preço
-menor**. A pesquisa que embasou este projeto indica que dia da semana e
-antecedência da compra pesam mais do que a hora exata da busca; o
-espalhamento serve pra fisgar quedas de preço que aparecem/somem ao longo do
-dia e para não concentrar todas as chamadas de API no mesmo horário.
+`SCAN_DIAS_SEMANA` é a única parte do agendamento antigo que continua vindo
+só do `.env` — dia da semana não é editável pelo painel de propósito.
 
-- **Local (Opção A ou B acima)**: é 100% dinâmico — o worker (`daemon`) e o
-  `instalar_tarefas_windows.ps1` leem `SCAN_HORARIOS`/`SCAN_DIAS_SEMANA`/
-  `EXPLORE_HORARIO` em runtime. Depois de editar o `.env`, reinicie o worker
-  daemon ou rode de novo `.\scripts\instalar_tarefas_windows.ps1` (ele recria
-  as tarefas do zero, uma por horário retornado — não precisa mais editar o
-  `.ps1`).
-- **Nuvem (GitHub Actions)**: o `on: schedule: cron` do `worker.yml` é YAML
-  **estático** — o GitHub lê esse arquivo na hora de agendar, não em tempo de
-  execução, então não dá pra apontar isso pro `.env` e deixar 100% dinâmico.
-  Para ajustar a automação da nuvem, gere as linhas de cron (já convertidas
-  de BRT para UTC) a partir da mesma config e cole no `worker.yml`:
-  ```bash
-  .venv\Scripts\python scripts\gerar_cron_actions.py
-  ```
-  Copie a saída para dentro do bloco `on: schedule:` em
-  `.github/workflows/worker.yml`, substituindo as linhas `- cron: ...`
-  atuais, e confira se o `if` do step "Rodar varredura" ainda compara
-  corretamente com o cron do explore (o script já avisa isso na saída).
+O padrão de horários semeado (madrugada/meio-dia/noite) só reflete um
+espalhamento ao longo do dia — **não há evidência forte de que uma hora
+específica tenha preço menor**. A pesquisa que embasou este projeto indica
+que dia da semana e antecedência da compra pesam mais do que a hora exata da
+busca; o espalhamento serve pra fisgar quedas de preço que aparecem/somem ao
+longo do dia e para não concentrar todas as chamadas de API no mesmo
+horário.
+
+Tanto a nuvem (GitHub Actions, ver `.github/workflows/worker.yml`) quanto o
+modo daemon local usam o **mesmo mecanismo de poll**: rodam
+`voofacil.worker.job_auto()` com frequência fixa e curta — a cada 15 minutos
+na nuvem (cron `*/15 * * * *`, fixo de propósito, nunca precisa mudar), a
+cada `agendamento_poll_minutos` no daemon local — e é o `job_auto()` que
+decide, olhando o banco (`deve_rodar_agora`), se dispara a varredura e/ou o
+explore agora. Quando não há nada agendado para o momento, ele sai rápido
+sem gastar nenhuma chamada de API.
 
 ## 4. Como funciona a detecção de "bom preço"
 

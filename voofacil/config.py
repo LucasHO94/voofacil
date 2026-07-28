@@ -49,6 +49,17 @@ class Settings(BaseSettings):
     scan_dias_semana: str = "*"                 # "*"=todos; ou CSV "mon,tue,wed,thu,fri,sat,sun"
     explore_horario: str = "05:00"              # busca ampla (SerpApi Explore), 1x/dia
 
+    # Agendamento dinâmico via banco (ver voofacil/engine/agendamento.py). Como o
+    # cron do GitHub Actions é YAML estático, o worker roda com frequência FIXA e
+    # curta (a cada agendamento_poll_minutos) e a cada execução decide, via
+    # deve_rodar_agora(), se é hora de varrer/explorar de verdade — a tolerância
+    # evita perder o horário configurado por o poll não bater exatamente em cima.
+    # IMPORTANTE: tolerancia precisa ser < poll_minutos/2 (aqui, <7.5 => 7), senão
+    # um horário cujo minuto cai perto do meio do intervalo entre dois polls fica
+    # dentro da janela de AMBOS e dispara em dobro (gasto de orçamento SerpApi/dia).
+    agendamento_tolerancia_minutos: int = 7   # janela de tolerância do poll
+    agendamento_poll_minutos: int = 15         # intervalo do poll (GH Actions/daemon local)
+
     @property
     def sqlalchemy_url(self) -> str:
         if self.database_url:

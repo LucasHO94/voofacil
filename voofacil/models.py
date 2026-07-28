@@ -59,6 +59,11 @@ class TipoData(str, enum.Enum):
     INTERVALO = "INTERVALO"        # qualquer data dentro de [ini, fim]
 
 
+class TipoHorario(str, enum.Enum):
+    VARREDURA = "VARREDURA"    # varredura regular (equivalente a scan_horarios)
+    EXPLORE = "EXPLORE"        # busca ampla/SerpApi Explore (equivalente a explore_horario)
+
+
 class Watch(Base):
     __tablename__ = "watch"
 
@@ -194,4 +199,34 @@ class ContadorDiarioApi(Base):
 
     __table_args__ = (
         Index("ux_contador_diario_provedor_dia", "provedor", "dia", unique=True),
+    )
+
+
+class HorarioAgendado(Base):
+    """Horários de varredura/explore, editáveis pelo painel Streamlit e
+    persistidos no banco (Postgres/Neon em produção) — substituem o que antes
+    só existia como CSV estático em `settings.scan_horarios` /
+    `settings.explore_horario`. O .env continua servindo de SEED inicial (ver
+    `voofacil.engine.agendamento.garantir_horarios_padrao`), mas depois de
+    semeado o banco manda: o usuário pode adicionar, excluir e editar
+    quantidade/valores direto no painel, sem reiniciar o processo.
+
+    `hora`/`minuto` são sempre horário LOCAL do Brasil (BRT, UTC-3) — o que o
+    usuário vê e edita no painel. A conversão para UTC (se necessária) fica a
+    cargo de quem consome (ex.: geração de cron do GitHub Actions)."""
+
+    __tablename__ = "horario_agendado"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tipo: Mapped[str] = mapped_column(String(10))
+    hora: Mapped[int]
+    minuto: Mapped[int]
+    ativo: Mapped[bool] = mapped_column(Boolean, default=True)
+    criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        CheckConstraint("tipo IN ('VARREDURA','EXPLORE')", name="ck_horario_agendado_tipo"),
+        CheckConstraint("hora BETWEEN 0 AND 23", name="ck_horario_agendado_hora"),
+        CheckConstraint("minuto BETWEEN 0 AND 59", name="ck_horario_agendado_minuto"),
+        Index("ix_horario_agendado_tipo_ativo", "tipo", "ativo"),
     )
