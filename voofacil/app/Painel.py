@@ -51,6 +51,7 @@ from voofacil.engine.agendamento import (  # noqa: E402
     garantir_horarios_padrao,
     listar_horarios,
 )
+from voofacil.providers.autocomplete import buscar_locais, rotulo_local
 from voofacil.worker import _providers_padrao, executar_varredura
 from scripts.seed_watch import ARRIVAL_AREA_ID, REGIOES
 
@@ -119,6 +120,44 @@ _ROTULOS_TIPO_DATA_VOLTA = {
 }
 
 
+def _buscador_local(rotulo: str, key: str) -> str | None:
+    """Campo de busca por nome (cidade/aeroporto/país) que resolve pro código
+    IATA — estilo Skyscanner. Roda FORA do form (mesmo motivo do Tipo/
+    Critérios avançados: precisa rerodar a cada busca, não só no submit).
+
+    Também aceita digitar o código IATA direto (3 letras) sem escolher da
+    lista — não força o usuário que já sabe o código a fazer buscas extras.
+    Uma escolha explícita na lista de resultados tem prioridade sobre o
+    código digitado (cobre o caso de a pessoa procurar por nome de cidade).
+    """
+    termo = st.text_input(
+        f"{rotulo} — cidade, aeroporto, país ou código IATA",
+        key=f"termo_{key}",
+        placeholder="Ex.: Lisboa, LIS, Portugal",
+    ).strip()
+
+    codigo_manual = termo.upper() if len(termo) == 3 and termo.isalpha() else None
+    codigo_selecionado = None
+
+    if len(termo) >= 2:
+        resultados = buscar_locais(termo)
+        if resultados:
+            opcoes = ["(escolha um resultado ou use o código digitado acima)"] + [
+                rotulo_local(r) for r in resultados
+            ]
+            escolha = st.selectbox(
+                f'Resultados para "{termo}"', opcoes, key=f"sel_{key}",
+            )
+            if escolha != opcoes[0]:
+                codigo_selecionado = resultados[opcoes.index(escolha) - 1]["code"]
+        else:
+            st.caption("Nenhum resultado — se já souber o código IATA (3 letras), pode digitar direto.")
+
+    codigo_final = codigo_selecionado or codigo_manual
+    st.caption(f"✅ Usando **{codigo_final}**" if codigo_final else "⚠️ Ainda sem código IATA resolvido.")
+    return codigo_final
+
+
 def aba_watches(session):
     st.subheader("Meus monitoramentos")
 
@@ -146,6 +185,17 @@ def aba_watches(session):
         ["Rota específica", "Região/país (busca ampla)", "Multidestino personalizado"],
         horizontal=True,
     )
+
+    # ---------- Origem/destino (busca por nome, fora do form pelo mesmo
+    # motivo do Tipo acima: precisa reagir a cada busca, não só no submit) ---
+    st.markdown("**De onde e para onde**")
+    col_origem, col_destino = st.columns(2)
+    with col_origem:
+        origem = _buscador_local("Origem", "origem")
+    destino = None
+    if tipo == "Rota específica":
+        with col_destino:
+            destino = _buscador_local("Destino", "destino")
 
     # ---------- Critérios avançados (opcionais) ----------
     # FORA do st.form: widgets dentro de um form só disparam rerun no submit,
@@ -208,17 +258,14 @@ def aba_watches(session):
     )
 
     with st.form("novo_watch", clear_on_submit=True):
-        origem = st.text_input("Origem (IATA)", max_chars=3, placeholder="GRU").upper()
         c1, c2 = st.columns(2)
         data_ini = c1.date_input("Embarque a partir de", value=date.today() + timedelta(days=30))
         data_fim = c2.date_input("Até", value=date.today() + timedelta(days=90))
         limite_str = st.text_input("Preço máximo em R$ (opcional)", placeholder="3500.00")
 
-        destino = regiao = None
+        regiao = None
         multidestino_str = ""
-        if tipo == "Rota específica":
-            destino = st.text_input("Destino (IATA)", max_chars=3, placeholder="LIS").upper()
-        elif tipo == "Região/país (busca ampla)":
+        if tipo == "Região/país (busca ampla)":
             regiao = st.selectbox("Região", sorted(REGIOES))
             st.caption(f"{len(REGIOES.get(regiao, []))} destinos na lista curada"
                        + (" · busca ampla via SerpApi Explore habilitada"
@@ -351,6 +398,12 @@ def aba_watches(session):
                     **kwargs_avancados,
                 )
             st.success("Monitoramento criado!")
+            # Os buscadores de Origem/Destino ficam FORA do st.form (ver
+            # _buscador_local), então clear_on_submit não os alcança — limpa
+            # na mão para não reusar sem querer a mesma origem/destino no
+            # próximo monitoramento.
+            for k in ("termo_origem", "sel_origem", "termo_destino", "sel_destino"):
+                st.session_state.pop(k, None)
             st.rerun()
 
 
