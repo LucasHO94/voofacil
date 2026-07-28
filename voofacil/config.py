@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     margem_novo_minimo: float = 0.02  # preço precisa ser 2% menor que o mínimo histórico
     fator_error_fare: float = 0.5     # preço <= 50% do baseline => error fare
     serpapi_orcamento_mes: int = 250  # free tier
+    serpapi_orcamento_dia: int = 8    # teto diário adicional (independente do mensal)
 
     # Agendamento das varreduras (configurável — ver voofacil/schedule_utils.py)
     # Padrão espalhado (madrugada/meio-dia/noite): não há evidência forte de que

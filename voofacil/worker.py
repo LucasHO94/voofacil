@@ -23,7 +23,7 @@ from voofacil.db import SessionLocal, init_db
 from voofacil.engine.confirmacao import confirmar_candidatos
 from voofacil.engine.detector import avaliar_snapshot
 from voofacil.engine.filtros import atende_criterios, atende_criterios_descoberta
-from voofacil.engine.orcamento import ha_orcamento, registrar_chamada
+from voofacil.engine.orcamento import ha_orcamento_serpapi, registrar_chamada_serpapi
 from voofacil.engine.store import persistir_quotes
 from voofacil.models import TipoWatch, Watch
 from voofacil.providers.base import Provider
@@ -84,7 +84,8 @@ def _providers_padrao(session, serpapi: SerpApiProvider | None = None) -> list[P
 
     A Travelpayouts (cache) é sempre incluída — é a fonte barata/de volume.
     A SerpApi (Google Flights) entra também quando está configurada (API
-    key presente) E há orçamento mensal disponível — dando ao usuário, para
+    key presente) E há orçamento disponível (mensal E diário, ver
+    voofacil/engine/orcamento.py) — dando ao usuário, para
     watches ROTA, uma segunda cotação AO VIVO na MESMA varredura ("estilo
     Skyscanner": duas fontes independentes lado a lado). Antes desta
     integração, a SerpApi só era usada para confirmar candidatos já
@@ -93,7 +94,7 @@ def _providers_padrao(session, serpapi: SerpApiProvider | None = None) -> list[P
     """
     providers: list[Provider] = [TravelpayoutsProvider()]
     serpapi = serpapi or SerpApiProvider()
-    if serpapi.configurado and ha_orcamento(session, serpapi.nome, settings.serpapi_orcamento_mes):
+    if serpapi.configurado and ha_orcamento_serpapi(session):
         providers.append(serpapi)
     return providers
 
@@ -136,8 +137,9 @@ def _meses_para_explorar(watch: Watch, qtd: int, hoje: date | None = None) -> li
 def executar_explore(session, provider: SerpApiProvider) -> ResultadoVarredura:
     """Busca ampla diária: watches REGIAO com arrival_area_id via SerpApi Explore.
 
-    Cada (watch, mês) consome 1 chamada do orçamento SerpApi — por isso é
-    1x/dia e limitado a MESES_EXPLORE_A_FRENTE, não a cada varredura 3x/dia.
+    Cada (watch, mês) consome 1 chamada do orçamento SerpApi (mensal E
+    diário) — por isso é 1x/dia e limitado a MESES_EXPLORE_A_FRENTE, não a
+    cada varredura 3x/dia.
     """
     resultado = ResultadoVarredura()
     watches = session.scalars(
@@ -153,13 +155,13 @@ def executar_explore(session, provider: SerpApiProvider) -> ResultadoVarredura:
     for watch in watches:
         total = 0
         for mes in _meses_para_explorar(watch, MESES_EXPLORE_A_FRENTE):
-            if not ha_orcamento(session, "SERPAPI", settings.serpapi_orcamento_mes):
-                log.warning("Orçamento SerpApi esgotado — explore do watch %s interrompido",
+            if not ha_orcamento_serpapi(session):
+                log.warning("Orçamento SerpApi esgotado (mensal ou diário) — explore do watch %s interrompido",
                             watch.id)
                 break
             try:
                 quotes = provider.explorar_regiao(watch.origem_iata, watch.arrival_area_id, mes)
-                registrar_chamada(session, "SERPAPI")
+                registrar_chamada_serpapi(session)
             except Exception:  # noqa: BLE001 — um mês/watch com falha não derruba o resto
                 log.exception("Falha no explore do watch %s (mes %s)", watch.id, mes)
                 continue

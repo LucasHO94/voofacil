@@ -177,3 +177,21 @@ class ContadorApi(Base):
     __table_args__ = (
         Index("ux_contador_provedor_mes", "provedor", "ano_mes", unique=True),
     )
+
+
+class ContadorDiarioApi(Base):
+    """Orçamento DIÁRIO de chamadas por provedor — complementa ContadorApi
+    (mensal). Existe para permitir um teto tipo "no máximo N chamadas/dia",
+    independente de quantas ainda restam no mês (ex.: SerpApi 8/dia, mesmo
+    com folga no orçamento mensal de 250)."""
+
+    __tablename__ = "contador_diario_api"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provedor: Mapped[str] = mapped_column(String(20))                 # 'SERPAPI'
+    dia: Mapped[str] = mapped_column(String(10))                      # '2026-07-28'
+    chamadas: Mapped[int] = mapped_column(default=0)
+
+    __table_args__ = (
+        Index("ux_contador_diario_provedor_dia", "provedor", "dia", unique=True),
+    )

@@ -4,16 +4,16 @@ A Travelpayouts entrega o volume (cache, defasagem até 48h); antes de
 alertar, tentamos 1 chamada `google_flights` por candidato para pegar o
 preço real do momento — evita alertar um preço que já subiu.
 
-Se o orçamento mensal (free tier 250/mês) já foi consumido ou a chamada
-falha, o candidato segue para o alerta MESMO ASSIM, mas marcado como
-"não confirmado" (dispatcher avisa o usuário a checar no link).
+Se o orçamento mensal (free tier 250/mês) OU o teto diário (padrão 8/dia,
+ver voofacil/engine/orcamento.py) já foi consumido, ou a chamada falha, o
+candidato segue para o alerta MESMO ASSIM, mas marcado como "não
+confirmado" (dispatcher avisa o usuário a checar no link).
 """
 from __future__ import annotations
 
 import logging
 
-from voofacil.config import settings
-from voofacil.engine.orcamento import ha_orcamento, registrar_chamada
+from voofacil.engine.orcamento import ha_orcamento_serpapi, registrar_chamada_serpapi
 from voofacil.providers.serpapi_google import SerpApiProvider
 from voofacil.schemas import Candidato
 
@@ -31,8 +31,8 @@ def confirmar_candidatos(
 
     confirmados = []
     for cand in candidatos:
-        if not ha_orcamento(session, "SERPAPI", settings.serpapi_orcamento_mes):
-            log.warning("Orçamento SerpApi do mês esgotado — candidato %s segue sem confirmação",
+        if not ha_orcamento_serpapi(session):
+            log.warning("Orçamento SerpApi esgotado (mensal ou diário) — candidato %s segue sem confirmação",
                         cand.snapshot_id)
             confirmados.append(cand)
             continue
@@ -41,7 +41,7 @@ def confirmar_candidatos(
                 cand.quote.origem, cand.quote.destino,
                 cand.quote.data_ida, cand.quote.data_volta,
             )
-            registrar_chamada(session, "SERPAPI")
+            registrar_chamada_serpapi(session)
         except Exception as exc:  # noqa: BLE001 — degrada para "não confirmado", nunca quebra a varredura
             log.warning("Falha ao confirmar candidato %s: %s", cand.snapshot_id, exc)
             confirmados.append(cand)

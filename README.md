@@ -135,11 +135,31 @@ Camadas avaliadas em ordem (a primeira que disparar vence):
 
 Cada rota tem cooldown de 12h: não alerta de novo a menos que o preço caia
 ainda mais. Todo alerta tenta confirmação ao vivo via SerpApi antes de sair
-(se configurada e dentro do orçamento de 250 buscas/mês) — sem confirmação,
-o alerta avisa que o preço é de cache e pode ter mudado.
+(se configurada e dentro do orçamento) — sem confirmação, o alerta avisa
+que o preço é de cache e pode ter mudado.
 
-Esses parâmetros (cooldown, margens, orçamento) ficam em `voofacil/config.py`
-e podem ser sobrescritos no `.env`.
+### Orçamento da SerpApi (mensal + diário)
+
+A SerpApi é chamada em 3 pontos — não só quando acha um preço bom:
+
+1. **Confirmação de candidato** (`confirmar_candidatos`) — só quando o
+   detector já sinalizou um preço bom, antes de alertar.
+2. **Varredura regular multi-fonte** (`sweep()`, watches ROTA) — em
+   **toda** varredura, para comparar Travelpayouts + Google Flights lado a
+   lado ("estilo Skyscanner"), independente do preço.
+3. **Busca ampla diária** (`executar_explore`, watches REGIAO) — 1x/dia
+   por região cadastrada, também independente do preço.
+
+Por isso existem DOIS limites, aplicados juntos (basta um estourar para
+bloquear): `serpapi_orcamento_mes` (free tier, padrão 250/mês) e
+`serpapi_orcamento_dia` (padrão 8/dia — evita que uma varredura com muitos
+watches ROTA gaste o mês inteiro em poucos dias). Sem orçamento, a SerpApi
+simplesmente some da rodada — o alerta continua saindo, só sem confirmação
+ao vivo.
+
+Esses parâmetros (cooldown, margens, orçamento mensal/diário) ficam em
+`voofacil/config.py` e podem ser sobrescritos no `.env`
+(`SERPAPI_ORCAMENTO_MES`, `SERPAPI_ORCAMENTO_DIA`).
 
 ## 5. Diagnóstico
 

@@ -19,7 +19,7 @@ from decimal import Decimal
 import httpx
 
 from voofacil.config import settings
-from voofacil.engine.orcamento import ha_orcamento, registrar_chamada
+from voofacil.engine.orcamento import ha_orcamento_serpapi, registrar_chamada_serpapi
 from voofacil.models import TipoData, TipoWatch, Watch
 from voofacil.schemas import PriceQuote
 
@@ -180,8 +180,11 @@ class SerpApiProvider:
         coberta pelo Explore diário (executar_explore em worker.py).
 
         Cota: só 1 chamada por watch/varredura, não 1 por dia da janela —
-        3 varreduras/dia x N dias de janela estouraria o free tier de
-        250/mês em poucos watches. A data usada é escolhida por
+        N varreduras/dia x N dias de janela estouraria o free tier de
+        250/mês em poucos watches; o teto diário adicional
+        (ha_orcamento_serpapi, ver voofacil/engine/orcamento.py) protege
+        contra isso mesmo quando o mês ainda tem folga. A data usada é
+        escolhida por
         `_data_alvo` (ver docstring lá): a própria data-alvo do watch
         quando EXATA/APROXIMADA, ou o meio da janela quando INTERVALO.
         A data de volta segue a mesma lógica sobre a janela de desembarque
@@ -191,7 +194,7 @@ class SerpApiProvider:
         `session` é opcional: o contrato genérico `Provider.sweep(watch)`
         (usado por `executar_varredura` em worker.py) não passa sessão.
         Quando chamada assim, abre uma sessão própria de curta duração só
-        para checar/gravar o orçamento (ContadorApi) e a fecha ao final;
+        para checar/gravar o orçamento (ContadorApi + ContadorDiarioApi) e a fecha ao final;
         passar uma sessão explicitamente (como fazem os testes) reaproveita
         a mesma transação do chamador.
         """
@@ -217,14 +220,14 @@ class SerpApiProvider:
 
             session = SessionLocal()
         try:
-            if not ha_orcamento(session, self.nome, settings.serpapi_orcamento_mes):
-                log.info("Orçamento SerpApi esgotado — sweep de rota pulado (watch %s)", watch.id)
+            if not ha_orcamento_serpapi(session):
+                log.info("Orçamento SerpApi esgotado (mensal ou diário) — sweep de rota pulado (watch %s)", watch.id)
                 return []
             try:
                 quote = self.confirmar_google_flights(
                     watch.origem_iata, watch.destino_iata, data_ida, data_volta
                 )
-                registrar_chamada(session, self.nome)
+                registrar_chamada_serpapi(session)
             except Exception:  # noqa: BLE001 — 1 falha no sweep multi-fonte não derruba a varredura
                 log.exception("Falha no sweep SerpApi (varredura regular) do watch %s", watch.id)
                 return []
