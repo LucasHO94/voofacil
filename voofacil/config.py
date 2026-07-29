@@ -50,14 +50,25 @@ class Settings(BaseSettings):
     explore_horario: str = "05:00"              # busca ampla (SerpApi Explore), 1x/dia
 
     # Agendamento dinâmico via banco (ver voofacil/engine/agendamento.py). Como o
-    # cron do GitHub Actions é YAML estático, o worker roda com frequência FIXA e
-    # curta (a cada agendamento_poll_minutos) e a cada execução decide, via
-    # deve_rodar_agora(), se é hora de varrer/explorar de verdade — a tolerância
-    # evita perder o horário configurado por o poll não bater exatamente em cima.
-    # IMPORTANTE: tolerancia precisa ser < poll_minutos/2 (aqui, <7.5 => 7), senão
-    # um horário cujo minuto cai perto do meio do intervalo entre dois polls fica
-    # dentro da janela de AMBOS e dispara em dobro (gasto de orçamento SerpApi/dia).
-    agendamento_tolerancia_minutos: int = 7   # janela de tolerância do poll
+    # cron do GitHub Actions é YAML estático, o worker roda num POLL de frequência
+    # fixa e curta e, a cada execução, decide olhando o banco se varre/explora.
+    #
+    # MODELO CATCH-UP (recuperação): a pergunta NÃO é mais "o poll caiu em cima do
+    # horário?" (janela de tolerância — removida) e sim "algum horário PASSOU desde
+    # a última vez que rodei?", via HorarioAgendado.ultima_execucao. Havia uma
+    # `agendamento_tolerancia_minutos` aqui; ela sumiu junto com a janela.
+    # O motivo é medido, não teórico: o GitHub Actions entrega só 4-7 dos 96
+    # disparos/dia prometidos por '*/15' em repo free, em horários imprevisíveis;
+    # ~5 polls aleatórios contra janelas somando 112 dos 1440 minutos do dia deram
+    # ZERO varreduras em 4 dias.
+    #
+    # Consequência prática: a frequência do poll passou a afetar só a LATÊNCIA
+    # (quão rápido um horário atrasado é recuperado), NUNCA a CORRETUDE. Se o
+    # horário das 09:00 passou e o próximo poll real só acontece às 11:37, a
+    # varredura acontece às 11:37 — e cada horário dispara no máximo uma vez por
+    # dia, porque a comparação é sempre contra a ocorrência mais recente dele.
+    # Por isso também não existe mais o risco de disparo em dobro: baixar o poll
+    # é seguro, só melhora a latência.
     agendamento_poll_minutos: int = 15         # intervalo do poll (GH Actions/daemon local)
 
     @property

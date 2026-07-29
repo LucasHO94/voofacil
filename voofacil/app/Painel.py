@@ -10,7 +10,7 @@ Rodar com:
 from __future__ import annotations
 
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -438,6 +438,32 @@ _TITULOS_TIPO_HORARIO = {
     "EXPLORE": "🌍 Busca ampla (Explore)",
 }
 
+# BRT = UTC-3 (Brasil não usa mais horário de verão desde 2019) — mesma
+# convenção de voofacil/engine/agendamento.py e voofacil/worker.py, sem lib
+# externa de timezone.
+_OFFSET_UTC_PARA_BRT_HORAS = 3
+
+
+def _texto_ultima_execucao(ultima_execucao: datetime | None) -> str:
+    """Formata `HorarioAgendado.ultima_execucao` (UTC) para leitura em BRT.
+
+    É o carimbo da execução REAL (quando o worker de fato varreu por causa
+    daquele horário) — é olhando para ele que o usuário confirma, com os
+    próprios olhos, que a automação está viva. `None` = nunca rodou.
+
+    O SQLite devolve datetime NAIVE mesmo em coluna `DateTime(timezone=True)`;
+    como tudo que o worker grava está em UTC, um valor sem tzinfo é assumido
+    como UTC (mesmo tratamento de `agendamento._como_utc_aware`).
+    """
+    if ultima_execucao is None:
+        return "⏳ ainda não rodou"
+    if ultima_execucao.tzinfo is None:
+        em_utc = ultima_execucao.replace(tzinfo=timezone.utc)
+    else:
+        em_utc = ultima_execucao.astimezone(timezone.utc)
+    em_brt = em_utc - timedelta(hours=_OFFSET_UTC_PARA_BRT_HORAS)
+    return f"✅ última: {em_brt:%d/%m %H:%M}"
+
 
 def _secao_horarios(session, tipo: str) -> None:
     """Lista/edita/exclui/adiciona horários de um `tipo` (VARREDURA ou EXPLORE).
@@ -476,10 +502,14 @@ def _secao_horarios(session, tipo: str) -> None:
                 st.session_state.agendamento_editando = None
                 st.rerun()
         else:
-            c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+            # c1 mais larga que na edição: além do HH:MM, carrega o carimbo da
+            # última execução real (em caption, logo abaixo) — informação nova
+            # sem espremer os botões nem poluir a linha do horário.
+            c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
             c1.markdown(
                 f"**{h.hora:02d}:{h.minuto:02d}**" + ("" if h.ativo else " 🔴 pausado")
             )
+            c1.caption(_texto_ultima_execucao(h.ultima_execucao))
             if c2.button("✏️", key=f"editar_horario_{tipo}_{h.id}"):
                 st.session_state.agendamento_editando = (tipo, h.id)
                 st.rerun()
@@ -512,12 +542,24 @@ def _secao_horarios(session, tipo: str) -> None:
 def aba_agendamento(session):
     st.subheader("Horários de varredura")
     st.caption(
-        "⚠️ Mudanças aqui valem a partir da PRÓXIMA verificação do worker "
-        "(rodando a cada ~15 minutos na nuvem via GitHub Actions) — não é "
-        "instantâneo. O cron do GitHub Actions em si é fixo (dispara a cada "
-        "~15 min); o que muda dinamicamente, a partir do que você configura "
-        "aqui, é O QUE o worker decide fazer em cada execução."
+        "⏰ O horário que você configura aqui é um **\"não antes de\"**, não uma "
+        "promessa de pontualidade: a varredura roda no PRIMEIRO disparo do "
+        "worker DEPOIS do horário. Na nuvem quem dispara é o GitHub Actions, "
+        "que descarta boa parte dos agendamentos de alta frequência — medimos "
+        "de 4 a 7 execuções por dia, não as 96 que o cron pede — então "
+        "o atraso pode ir de minutos a algumas horas. Nenhum horário é perdido: "
+        "quando o worker finalmente acorda, ele roda o que ficou para trás "
+        "(no máximo uma vez por horário por dia). O carimbo \"última\" de cada "
+        "horário abaixo mostra quando ele DE FATO rodou — é por ali que você "
+        "confirma que a automação está viva."
     )
+
+    # O worker roda em outro processo/máquina e a sessão do painel sobrevive
+    # entre reruns no st.session_state — sem expirar, o SQLAlchemy serviria o
+    # `ultima_execucao` que já estava na identity map (ele não sobrescreve
+    # atributo já carregado) e o carimbo abaixo nasceria velho. Só afeta
+    # exibição; as demais abas já renderizaram neste ponto.
+    session.expire_all()
 
     col1, col2 = st.columns(2)
     with col1:

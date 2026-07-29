@@ -223,6 +223,15 @@ class HorarioAgendado(Base):
     minuto: Mapped[int]
     ativo: Mapped[bool] = mapped_column(Boolean, default=True)
     criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Carimbo (em UTC, tz-aware) da última execução REAL deste horário — quando
+    # o worker de fato varreu/explorou por causa dele, NÃO quando "era pra ter"
+    # rodado. É o estado que sustenta o modelo catch-up de
+    # `voofacil.engine.agendamento`: em vez de perguntar "estou EM CIMA do
+    # horário agora?", pergunta-se "a ocorrência mais recente deste horário é
+    # POSTERIOR a `ultima_execucao`?". NULL = nunca executou, logo está devido
+    # (é também o valor de toda linha pré-existente no banco de produção após a
+    # micro-migração de voofacil/db.py).
+    ultima_execucao: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         CheckConstraint("tipo IN ('VARREDURA','EXPLORE')", name="ck_horario_agendado_tipo"),

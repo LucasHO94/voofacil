@@ -13,10 +13,28 @@ e agendados via CronTrigger direto no processo. Agora eles moram no banco
 (HorarioAgendado, ver voofacil/engine/agendamento.py) e tanto o daemon local
 quanto a nuvem (GitHub Actions, ver .github/workflows/worker.yml) fazem
 POLL de frequência fixa e curta (settings.agendamento_poll_minutos) chamando
-job_auto(), que decide internamente (deve_rodar_agora) se é hora de varrer
-e/ou explorar de verdade. --once/--once-explore continuam existindo tal
-qual antes, sem depender do banco, para teste manual e para o botão "Varrer
-agora" do painel.
+job_auto(), que decide internamente se é hora de varrer e/ou explorar de
+verdade. --once/--once-explore continuam existindo tal qual antes, sem
+depender do banco, para teste manual e para o botão "Varrer agora" do painel.
+
+MODELO CATCH-UP (recuperação) — job_auto NÃO usa mais janela de tolerância.
+O poll da nuvem não é confiável: medindo o histórico deste repo, dos 96
+disparos/dia prometidos pelo cron '*/15' o GitHub Actions entrega de 4 a 7,
+em horários imprevisíveis. Perguntar "o poll caiu a ±7 min de algum horário
+agendado?" dava não quase sempre — resultado medido: ZERO varreduras em 4
+dias. A pergunta certa é "algum horário PASSOU desde a última vez que rodei?"
+(igual ao Persistent=true do systemd-timer). O fluxo de job_auto é, por tipo:
+
+    horarios_devidos()  ->  roda o job UMA vez  ->  marcar_executados()
+
+A ORDEM é deliberada: marca-se DEPOIS de rodar. Marcar antes daria semântica
+at-most-once (se o processo morresse no meio, aquele horário estaria perdido
+pelo resto do dia); marcar depois dá at-least-once, que é o correto aqui —
+o pior caso vira uma varredura repetida, não uma varredura perdida.
+
+Com isso, a frequência do poll afeta só a LATÊNCIA (quão rápido um horário
+atrasado é recuperado), nunca a CORRETUDE: se o horário das 09:00 passou e o
+próximo disparo real só chega às 11:37, a varredura acontece às 11:37.
 
 NUNCA importar/rodar isto dentro do Streamlit (a página re-executa a cada
 interação e criaria/mataria schedulers).
@@ -33,13 +51,18 @@ from sqlalchemy import select
 from voofacil.alerts.dispatcher import canais_padrao, despachar
 from voofacil.config import settings
 from voofacil.db import SessionLocal, init_db
-from voofacil.engine.agendamento import deve_rodar_agora, garantir_horarios_padrao
+from voofacil.engine.agendamento import (
+    garantir_horarios_padrao,
+    horarios_devidos,
+    listar_horarios,
+    marcar_executados,
+)
 from voofacil.engine.confirmacao import confirmar_candidatos
 from voofacil.engine.detector import avaliar_snapshot
 from voofacil.engine.filtros import atende_criterios, atende_criterios_descoberta
 from voofacil.engine.orcamento import ha_orcamento_serpapi, registrar_chamada_serpapi
 from voofacil.engine.store import persistir_quotes
-from voofacil.models import TipoHorario, TipoWatch, Watch
+from voofacil.models import HorarioAgendado, TipoHorario, TipoWatch, Watch
 from voofacil.providers.base import Provider
 from voofacil.providers.serpapi_google import SerpApiProvider
 from voofacil.providers.travelpayouts import TravelpayoutsProvider
@@ -117,8 +140,14 @@ def _providers_padrao(session, serpapi: SerpApiProvider | None = None) -> list[P
     return providers
 
 
-def job_varredura() -> None:
-    """Job agendado: sessão própria, commit no fim, erros logados."""
+def job_varredura() -> bool:
+    """Job agendado: sessão própria, commit no fim, erros logados.
+
+    Devolve True se a varredura concluiu e False se abortou. Quem chama
+    (job_auto) usa isso para NÃO carimbar o horário como executado quando a
+    rodada falhou — senão uma API fora do ar consumiria a ocorrência do dia
+    e o horário só voltaria a ser tentado no dia seguinte.
+    """
     with SessionLocal() as session:
         try:
             resultado = executar_varredura(session, providers=_providers_padrao(session))
@@ -132,9 +161,11 @@ def job_varredura() -> None:
                 len(resultado.candidatos),
                 len(enviados),
             )
+            return True
         except Exception:  # noqa: BLE001
             session.rollback()
             log.exception("Varredura abortada")
+            return False
 
 
 def _meses_a_frente(qtd: int, hoje: date | None = None) -> list[int]:
@@ -195,12 +226,18 @@ def executar_explore(session, provider: SerpApiProvider) -> ResultadoVarredura:
     return resultado
 
 
-def job_explore() -> None:
-    """Job diário de busca ampla (separado da varredura 3x/dia)."""
+def job_explore() -> bool:
+    """Job diário de busca ampla (separado da varredura 3x/dia).
+
+    Devolve True se concluiu e False se abortou (mesma semântica de
+    job_varredura — ver docstring de lá). SerpApi não configurada conta como
+    concluído: não é falha transitória, tentar de novo no próximo poll não
+    mudaria nada.
+    """
     provider = SerpApiProvider()
     if not provider.configurado:
         log.info("SerpApi não configurada — pulando explore diário")
-        return
+        return True
     with SessionLocal() as session:
         try:
             resultado = executar_explore(session, provider)
@@ -213,9 +250,11 @@ def job_explore() -> None:
                 sum(resultado.snapshots_por_watch.values()),
                 len(enviados),
             )
+            return True
         except Exception:  # noqa: BLE001
             session.rollback()
             log.exception("Explore abortado")
+            return False
 
 
 def _dia_permitido_hoje(agora_utc: datetime | None = None) -> bool:
@@ -224,7 +263,7 @@ def _dia_permitido_hoje(agora_utc: datetime | None = None) -> bool:
 
     `agora_utc` é opcional (default: `datetime.now(timezone.utc)`) — só
     existe para permitir teste determinístico, mesmo padrão de
-    `deve_rodar_agora` em voofacil/engine/agendamento.py. Dia da semana
+    `horarios_devidos` em voofacil/engine/agendamento.py. Dia da semana
     continua vindo do `.env` (não é editável pelo painel) — é a única parte
     do agendamento antigo que segue estática de propósito.
     """
@@ -239,21 +278,85 @@ def _dia_permitido_hoje(agora_utc: datetime | None = None) -> bool:
     return dia_hoje in dias.split(",")
 
 
+def _hhmm(horario: HorarioAgendado) -> str:
+    """"06:00" — hora/minuto do HorarioAgendado (que são BRT) para log."""
+    return f"{horario.hora:02d}:{horario.minuto:02d}"
+
+
+def _resumo_horarios(horarios: list[HorarioAgendado]) -> str:
+    """Diagnóstico legível de um conjunto de horários ativos, com a última
+    execução de cada um — ex.: "06:00 (última exec. 2026-07-24 11:37 UTC),
+    12:30 (nunca executou)".
+
+    Só é usado no log do caso "nada devido". A automação já ficou 4 dias morta
+    logando apenas "nada agendado para agora", sem nenhum dado para investigar;
+    esta string existe para que o próximo diagnóstico saia de um log só."""
+    if not horarios:
+        return "nenhum horário ativo"
+    partes = []
+    for h in horarios:
+        if h.ultima_execucao is None:
+            quando = "nunca executou"
+        else:
+            # Normaliza antes de rotular "UTC": o psycopg devolve o valor no fuso
+            # da SESSÃO do Postgres, então imprimir cru com o sufixo fixo faria o
+            # log mentir a hora se esse fuso não fosse UTC — justamente no log que
+            # existe para diagnosticar agendamento morto. Naive == UTC, mesma
+            # convenção de engine/agendamento._como_utc_aware.
+            bruto = h.ultima_execucao
+            em_utc = (bruto.replace(tzinfo=timezone.utc) if bruto.tzinfo is None
+                      else bruto.astimezone(timezone.utc))
+            quando = f"última exec. {em_utc:%Y-%m-%d %H:%M} UTC"
+        partes.append(f"{_hhmm(h)} ({quando})")
+    return ", ".join(partes)
+
+
+def _marcar_executados_por_id(ids: list[int], agora_utc: datetime) -> None:
+    """Carimba `ultima_execucao` nos horários de `ids` numa sessão NOVA.
+
+    Por que por ID e não pelos objetos lidos antes: os HorarioAgendado são
+    lidos numa sessão que é fechada ANTES de rodar job_varredura()/job_explore()
+    (para não segurar conexão ociosa do Neon durante uma varredura que pode
+    levar minutos). Usar aqueles objetos destacados arriscaria
+    DetachedInstanceError; recarregá-los por ID mantém o padrão de cada job
+    abrir a própria sessão e ainda pega o estado mais recente do banco.
+
+    Um horário excluído pelo painel entre a leitura e a marcação simplesmente
+    some da lista (`session.get` devolve None) — não é erro."""
+    if not ids:
+        return
+    with SessionLocal() as session:
+        horarios = [h for h in (session.get(HorarioAgendado, i) for i in ids) if h is not None]
+        marcar_executados(session, horarios, agora_utc)
+
+
 def job_auto(agora_utc: datetime | None = None) -> None:
     """Job único do poll de frequência fixa (chamado a cada
     `settings.agendamento_poll_minutos`, tanto pelo GitHub Actions quanto
-    pelo daemon local) — decide via banco se é hora de varrer e/ou explorar
-    agora, sem gastar nenhuma chamada de API quando não é.
+    pelo daemon local) — decide via banco se há varredura e/ou explore
+    DEVIDOS, sem gastar nenhuma chamada de API quando não há.
 
-    As duas checagens (VARREDURA/EXPLORE) são independentes: se os horários
-    coincidirem, as duas disparam na mesma chamada. `garantir_horarios_padrao`
-    e `deve_rodar_agora` rodam numa sessão PRÓPRIA, só de leitura/seed, que é
-    fechada ANTES de chamar `job_varredura()`/`job_explore()` — essas duas
-    abrem cada uma a sua própria sessão internamente.
+    Modelo catch-up (ver docstring do módulo): para cada tipo pega-se a lista
+    de horários devidos (`horarios_devidos`); se a lista não estiver vazia,
+    roda-se o job UMA vez — independente de quantos horários estejam devidos,
+    porque uma varredura já cobre todos eles — e só DEPOIS marca-se a lista
+    inteira como executada (`marcar_executados`), E SÓ SE o job tiver
+    CONCLUÍDO (job_varredura/job_explore devolvem bool). Essas duas condições
+    juntas é que dão at-least-once de verdade: se o processo morrer no meio,
+    ou se a rodada abortar (API fora do ar, banco indisponível), o horário
+    continua devido e é retentado no próximo poll, em vez de ser consumido
+    por uma execução que não coletou nada.
+
+    As duas checagens (VARREDURA/EXPLORE) são independentes: se ambas
+    estiverem devidas, as duas disparam na mesma chamada.
+    `garantir_horarios_padrao` e `horarios_devidos` rodam numa sessão PRÓPRIA,
+    só de leitura/seed, fechada ANTES de chamar `job_varredura()`/
+    `job_explore()` — essas duas abrem cada uma a sua própria sessão
+    internamente, e a marcação abre mais uma (ver `_marcar_executados_por_id`).
 
     `agora_utc` é opcional (default: `datetime.now(timezone.utc)`) — só
     existe para permitir teste determinístico (mesmo padrão de
-    `deve_rodar_agora`).
+    `horarios_devidos`).
     """
     if agora_utc is None:
         agora_utc = datetime.now(timezone.utc)
@@ -267,17 +370,45 @@ def job_auto(agora_utc: datetime | None = None) -> None:
 
     with SessionLocal() as session:
         garantir_horarios_padrao(session)
-        rodar_varredura = deve_rodar_agora(session, TipoHorario.VARREDURA.value, agora_utc)
-        rodar_explore = deve_rodar_agora(session, TipoHorario.EXPLORE.value, agora_utc)
+        devidos_varredura = horarios_devidos(session, TipoHorario.VARREDURA.value, agora_utc)
+        devidos_explore = horarios_devidos(session, TipoHorario.EXPLORE.value, agora_utc)
+        # Só os IDs e os rótulos atravessam o fim da sessão — os objetos ficam
+        # para trás de propósito (ver _marcar_executados_por_id).
+        ids_varredura = [h.id for h in devidos_varredura]
+        ids_explore = [h.id for h in devidos_explore]
+        rotulos_varredura = ", ".join(_hhmm(h) for h in devidos_varredura)
+        rotulos_explore = ", ".join(_hhmm(h) for h in devidos_explore)
 
-    if not rodar_varredura and not rodar_explore:
-        log.info("nada agendado para agora")
-        return
+        if not ids_varredura and not ids_explore:
+            # Caminho mais comum (a maioria dos polls não tem nada a fazer):
+            # loga o estado completo do agendamento, senão um agendamento morto
+            # fica indistinguível de um agendamento ocioso.
+            log.info(
+                "Nada devido agora (catch-up, agora=%s UTC) — VARREDURA: %s | EXPLORE: %s",
+                agora_utc.strftime("%Y-%m-%d %H:%M"),
+                _resumo_horarios(listar_horarios(session, TipoHorario.VARREDURA.value)),
+                _resumo_horarios(listar_horarios(session, TipoHorario.EXPLORE.value)),
+            )
+            return
 
-    if rodar_varredura:
-        job_varredura()
-    if rodar_explore:
-        job_explore()
+    if ids_varredura:
+        log.info("Varredura devida — recuperando horário(s) %s (BRT)", rotulos_varredura)
+        if job_varredura():                                   # só carimba se CONCLUIU
+            _marcar_executados_por_id(ids_varredura, agora_utc)
+        else:
+            log.warning(
+                "Varredura abortada — horário(s) %s continuam devidos e serão "
+                "retentados no próximo poll", rotulos_varredura,
+            )
+    if ids_explore:
+        log.info("Explore devido — recuperando horário(s) %s (BRT)", rotulos_explore)
+        if job_explore():
+            _marcar_executados_por_id(ids_explore, agora_utc)
+        else:
+            log.warning(
+                "Explore abortado — horário(s) %s continuam devidos e serão "
+                "retentados no próximo poll", rotulos_explore,
+            )
 
 
 def main() -> None:
@@ -291,8 +422,9 @@ def main() -> None:
     parser.add_argument("--once-explore", action="store_true",
                         help="executa uma rodada única de busca ampla (SerpApi Explore) e sai")
     parser.add_argument("--auto", action="store_true",
-                        help="decide via banco (job_auto/deve_rodar_agora) se varre e/ou explora "
-                             "agora e sai — usado pelo poll do GitHub Actions/daemon local")
+                        help="decide via banco (job_auto/horarios_devidos) se há varredura e/ou "
+                             "explore DEVIDOS — inclusive horários atrasados, modelo catch-up — "
+                             "roda e sai; usado pelo poll do GitHub Actions/daemon local")
     args = parser.parse_args()
 
     init_db()
@@ -320,7 +452,8 @@ def main() -> None:
     )
     log.info(
         "Worker em modo poll: a cada %s min chama job_auto(), que decide via banco "
-        "(HorarioAgendado, editável pelo painel) se varre e/ou explora agora "
+        "(HorarioAgendado, editável pelo painel) se há horário DEVIDO — inclusive "
+        "atrasado, modelo catch-up: o poll define só a latência da recuperação "
         "(dias=%s vindo do .env, jitter +/-%ss). Ctrl+C para sair.",
         settings.agendamento_poll_minutos, settings.scan_dias_semana, JITTER_SEGUNDOS,
     )

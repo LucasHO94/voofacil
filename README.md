@@ -60,6 +60,10 @@ o Explore diário.
 O worker é um **processo separado** do painel — nunca roda dentro do
 Streamlit. Duas formas de operar, escolha uma:
 
+> **Antes de tudo, o modelo mental certo:** o horário que você configura é um
+> **"não antes de"**, não um compromisso de pontualidade. Detalhes em
+> "Como o worker decide se roda (modelo catch-up)", mais abaixo.
+
 ### Opção A — Windows Task Scheduler (recomendada para uso contínuo)
 
 ```powershell
@@ -69,9 +73,10 @@ Streamlit. Duas formas de operar, escolha uma:
 Cria **uma única** tarefa agendada (`VooFacil-Poll`) rodando
 `python -m voofacil.worker --auto` a cada `agendamento_poll_minutos` minutos
 (15 por padrão) indefinidamente. A cada execução o worker consulta o banco e
-decide sozinho se é hora de varrer e/ou explorar de verdade (ver "Mudando os
-horários" abaixo) — a tarefa em si nunca muda, só o banco. Por padrão só roda
-com você logado (sem senha, sem admin). Para rodar mesmo desconectado, use
+decide sozinho se algum horário ficou para trás desde a última execução (ver
+"Como o worker decide se roda" abaixo) — a tarefa em si nunca muda, só o
+banco. Por padrão só roda com você logado (sem senha, sem admin). Para rodar
+mesmo desconectado, use
 `-RodarDesconectado` (pede senha da sua conta e precisa de PowerShell como
 administrador). Para remover: `.\scripts\instalar_tarefas_windows.ps1 -Remover`.
 
@@ -98,7 +103,9 @@ Os horários de varredura e de busca ampla (explore) agora são **editáveis
 direto no painel Streamlit, na aba Agendamento** — adicionar, remover,
 ativar/desativar e alterar hora/minuto não exige mexer em código nem
 reiniciar nada, tanto localmente quanto na nuvem (o painel e o worker
-compartilham o mesmo banco).
+compartilham o mesmo banco). Cada horário na aba mostra também o carimbo
+**"última: DD/MM HH:MM"** (ou "ainda não rodou") — é olhando para ele que
+você confirma, com os próprios olhos, que a automação está viva.
 
 O `.env` (`SCAN_HORARIOS`/`EXPLORE_HORARIO`) só serve de **semente inicial**:
 na primeira vez que o worker roda (`garantir_horarios_padrao`), se a tabela
@@ -124,14 +131,50 @@ busca; o espalhamento serve pra fisgar quedas de preço que aparecem/somem ao
 longo do dia e para não concentrar todas as chamadas de API no mesmo
 horário.
 
+### Como o worker decide se roda (modelo catch-up)
+
 Tanto a nuvem (GitHub Actions, ver `.github/workflows/worker.yml`) quanto o
 modo daemon local usam o **mesmo mecanismo de poll**: rodam
-`voofacil.worker.job_auto()` com frequência fixa e curta — a cada 15 minutos
-na nuvem (cron `*/15 * * * *`, fixo de propósito, nunca precisa mudar), a
-cada `agendamento_poll_minutos` no daemon local — e é o `job_auto()` que
-decide, olhando o banco (`deve_rodar_agora`), se dispara a varredura e/ou o
-explore agora. Quando não há nada agendado para o momento, ele sai rápido
-sem gastar nenhuma chamada de API.
+`voofacil.worker.job_auto()` de tempos em tempos — cron `*/15 * * * *` na
+nuvem (fixo de propósito, nunca precisa mudar), a cada
+`agendamento_poll_minutos` no daemon local — e é o `job_auto()` que decide,
+olhando o banco, se dispara a varredura e/ou o explore. Quando não há nada
+devido, ele sai rápido sem gastar nenhuma chamada de API.
+
+**O cron do GitHub Actions não é confiável — e isso não é opinião, é medição.**
+Em repositório free/público a plataforma descarta a maior parte dos
+agendamentos de alta frequência: dos **96 disparos/dia** que o `*/15` pede,
+o histórico deste repo mostra que chegam de **4 a 7**, em horários
+imprevisíveis, com 1 a 3 horas entre execuções.
+
+Por isso o worker **não pergunta "estou no horário agora?"**. A pergunta
+antiga era essa (o horário BRT de agora está a ±N minutos de algum horário
+agendado?) e o resultado medido foi **zero varreduras em 4 dias**: com ~5
+polls por dia caindo em minutos aleatórios contra janelas que somavam ~112
+dos 1440 minutos do dia, a resposta era praticamente sempre "não" e toda
+execução logava `nada agendado para agora`. A automação inteira estava morta
+sem que nada acusasse erro.
+
+A pergunta certa é **"algum horário PASSOU desde a última vez que eu
+rodei?"** — o mesmo modelo do `Persistent=true` do systemd-timer ou do
+misfire handling do APScheduler. Cada `HorarioAgendado` guarda um carimbo
+`ultima_execucao`; `horarios_devidos()` devolve os que têm ocorrência mais
+recente posterior a esse carimbo, e `marcar_executados()` carimba depois que
+a varredura de fato rodou. Consequências práticas:
+
+- **Nenhum horário é perdido, só eventualmente atrasado.** Se o horário das
+  09:00 passou e o próximo disparo real do GitHub Actions só acontece às
+  11:37, a varredura acontece às 11:37.
+- **Nada acumula.** A comparação é sempre contra a ocorrência *mais recente*
+  do horário, então cada horário dispara no máximo uma vez por dia — um
+  worker parado o dia inteiro não gera uma enxurrada de execuções atrasadas.
+- **O horário que você configura no painel é um "não antes de"**, não um
+  compromisso de pontualidade: o atraso pode ir de minutos a algumas horas.
+  Se você precisa de pontualidade real, rode o worker como daemon/Task
+  Scheduler (opções A e B acima), onde o poll é seu e não do GitHub.
+- Aumentar ou diminuir `agendamento_poll_minutos` afeta só a **latência** da
+  recuperação, nunca a corretude — não existe mais janela de tolerância a
+  ajustar (a antiga `AGENDAMENTO_TOLERANCIA_MINUTOS` deixou de existir).
 
 ## 4. Como funciona a detecção de "bom preço"
 

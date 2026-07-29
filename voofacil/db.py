@@ -35,18 +35,29 @@ def init_db() -> None:
     from voofacil import models  # noqa: F401 — registra os mapeamentos
 
     models.Base.metadata.create_all(engine)
-    _migrar_sqlite()
+    _migrar_colunas_novas()
 
 
-def _migrar_sqlite() -> None:
-    """Micro-migração: adiciona colunas novas em bancos SQLite já criados.
+def _migrar_colunas_novas() -> None:
+    """Micro-migração: adiciona colunas novas em tabelas JÁ EXISTENTES.
 
-    create_all não altera tabelas existentes; para um projeto pessoal isto
-    substitui o Alembic. Adicionar aqui cada coluna nova de versões futuras.
+    `create_all` só cria tabelas que faltam — ele NÃO altera tabela existente.
+    Sem isto, todo banco antigo (dev em SQLite e, principalmente, o Postgres/
+    Neon de produção, que já tem `horario_agendado` sem `ultima_execucao`)
+    quebraria com "column ... does not exist" no primeiro SELECT do ORM.
+    Para um projeto pessoal isto substitui o Alembic — basta acrescentar aqui
+    cada coluna nova de versões futuras.
+
+    Roda nos DOIS dialetos: a descoberta das colunas existentes usa
+    `sqlalchemy.inspect(engine).get_columns(...)`, que é portável, em vez do
+    `PRAGMA table_info` (só SQLite) usado antes. A única diferença por dialeto
+    é a grafia do tipo timestamp com fuso: Postgres quer
+    "TIMESTAMP WITH TIME ZONE", SQLite guarda tudo como texto/"TIMESTAMP".
     """
-    if not settings.sqlalchemy_url.startswith("sqlite"):
-        return
-    from sqlalchemy import text
+    from sqlalchemy import inspect, text
+
+    e_sqlite = engine.dialect.name == "sqlite"
+    timestamp_tz = "TIMESTAMP" if e_sqlite else "TIMESTAMP WITH TIME ZONE"
 
     colunas_novas = {
         "watch": [
@@ -60,12 +71,30 @@ def _migrar_sqlite() -> None:
             ("preco_minimo", "NUMERIC(12,2)"),
             ("preco_aproximado", "NUMERIC(12,2)"),
         ],
+        "horario_agendado": [
+            # Modelo catch-up do agendamento (ver voofacil/engine/agendamento.py).
+            ("ultima_execucao", timestamp_tz),
+        ],
     }
+
+    # A checagem abaixo é check-then-act: entre ler as colunas e emitir o ALTER
+    # existe uma janela. Ela importa de verdade uma única vez na vida do banco —
+    # no deploy que introduz a coluna, quando worker (GitHub Actions) e painel
+    # (Streamlit Cloud) reiniciam juntos e podem chamar init_db() ao mesmo tempo
+    # contra o mesmo Neon: os dois veem a coluna faltando e os dois tentam criar,
+    # e o perdedor da corrida morre com DuplicateColumn. Por isso o Postgres
+    # ganha "IF NOT EXISTS" (o SQLite não suporta a cláusula, mas lá não há
+    # concorrência entre processos que justifique).
+    se_nao_existir = "" if e_sqlite else "IF NOT EXISTS "
+
+    inspetor = inspect(engine)
     with engine.begin() as conn:
         for tabela, colunas in colunas_novas.items():
-            existentes = {
-                linha[1] for linha in conn.execute(text(f"PRAGMA table_info({tabela})"))
-            }
+            if not inspetor.has_table(tabela):
+                continue  # banco novo em que create_all ainda não passou por aqui
+            existentes = {c["name"] for c in inspetor.get_columns(tabela)}
             for nome, tipo in colunas:
                 if nome not in existentes:
-                    conn.execute(text(f"ALTER TABLE {tabela} ADD COLUMN {nome} {tipo}"))
+                    conn.execute(text(
+                        f"ALTER TABLE {tabela} ADD COLUMN {se_nao_existir}{nome} {tipo}"
+                    ))

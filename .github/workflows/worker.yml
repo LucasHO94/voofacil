@@ -3,19 +3,46 @@ name: VooFacil Worker (varredura periodica)
 # Roda a varredura do VooFacil na nuvem, sem depender do PC do usuario.
 #
 # Modelo (agendamento dinamico via banco, ver voofacil/engine/agendamento.py):
-# o GitHub Actions dispara este workflow a cada 15 minutos, SEMPRE (o cron
-# abaixo eh fixo/curto de proposito, nao precisa mudar quando o usuario troca
-# os horarios). A cada execucao, o worker roda em modo "--auto"
-# (voofacil.worker.job_auto): ele consulta o banco (tabela HorarioAgendado,
-# editavel na aba Agendamento do painel Streamlit) e decide sozinho, via
-# deve_rodar_agora(), se ha uma varredura e/ou um explore para rodar de
-# verdade agora - se nao houver, o job sai rapido sem gastar nenhuma chamada
-# de API. Ou seja: mudar os horarios agora eh so mexer no painel, sem tocar
-# neste arquivo. O repo eh publico, entao minutos de Actions sao ilimitados
-# (sem custo) mesmo rodando a cada 15 min o dia inteiro.
+# os horarios reais NAO ficam aqui. Eles moram no banco (tabela
+# HorarioAgendado, editavel na aba Agendamento do painel Streamlit); os crons
+# abaixo sao so um POLL fixo, e a cada disparo o worker roda em modo "--auto"
+# (voofacil.worker.job_auto) e decide sozinho se ha varredura e/ou explore a
+# fazer - se nao houver, sai rapido sem gastar nenhuma chamada de API. Mudar
+# horario eh so mexer no painel, sem tocar neste arquivo.
+#
+# REALIDADE MEDIDA DO CRON (nao eh teoria, foi contado no historico deste
+# repo): o comentario antigo dizia que este workflow dispara "a cada 15
+# minutos". Isso eh FALSO na pratica. Dos 96 disparos/dia prometidos por
+# '*/15', o GitHub Actions entrega de 4 a 7. A plataforma da baixa prioridade
+# a cron de repositorio free/publico, descarta ~95% dos agendamentos de alta
+# frequencia e entrega o resto em horarios imprevisiveis, com 1 a 3 horas
+# entre execucoes. Nao ha configuracao que conserte isso - eh comportamento
+# documentado deles.
+#
+# POR QUE ISSO PASSOU A SER ACEITAVEL: o worker usa modelo CATCH-UP. Ele nao
+# pergunta mais "o disparo caiu em cima de algum horario agendado?" (janela de
+# tolerancia - removida, ela dava zero varreduras em 4 dias contra ~5 polls
+# aleatorios por dia) e sim "algum horario PASSOU desde a ultima vez que eu
+# rodei?", comparando com HorarioAgendado.ultima_execucao. Com isso, disparo
+# perdido deixou de causar varredura perdida: se o horario das 09:00 passou e
+# o proximo disparo real so chega 11:37, a varredura acontece as 11:37. Cada
+# horario dispara no maximo uma vez por dia (a ocorrencia mais recente), nunca
+# acumula execucoes atrasadas.
+#
+# POR QUE DOIS CRONS: sao cinto e suspensorio, e agora mais disparo so
+# significa MENOS LATENCIA na recuperacao (nunca execucao em dobro).
+#   - '*/15 * * * *' : alta frequencia. A maioria eh descartada, mas o que
+#     passa recupera rapido.
+#   - '37 * * * *'   : uma vez por hora, em minuto NAO redondo. Cron horario
+#     em minuto quebrado eh entregue com muito mais confiabilidade que */15 -
+#     minuto redondo eh justamente onde a fila do Actions fica congestionada.
+#     Este eh o piso: garante recuperacao em ~1h no pior caso.
+# O bloco "concurrency" abaixo impede sobreposicao se os dois coincidirem.
+# O repo eh publico, entao minutos de Actions sao ilimitados (sem custo).
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/15 * * * *'      # poll rapido (entrega ruim, mas quando entrega recupera rapido)
+    - cron: '37 * * * *'        # piso horario em minuto quebrado (entrega mais confiavel)
   workflow_dispatch:            # botao "Run workflow" para disparo manual/teste
 
 # Evita duas rodadas simultaneas se uma demorar

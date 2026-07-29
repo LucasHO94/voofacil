@@ -13,18 +13,37 @@ propósito depois, não volta a semear sozinho.
 Por que isso existe: o `on: schedule: cron` do GitHub Actions é YAML
 ESTÁTICO — não dá pra apontar pro banco e disparar em horários 100%
 dinâmicos na nuvem. A solução é o workflow rodar com frequência FIXA e curta
-(a cada `settings.agendamento_poll_minutos`, ex.: 15 min) e, a CADA
-execução, o worker perguntar `deve_rodar_agora()`: se a resposta for não,
-sai sem gastar nenhuma chamada de API. `deve_rodar_agora` decide isso
-comparando o horário BRT atual contra os `HorarioAgendado` ativos do tipo
-pedido, com uma janela de tolerância (`settings.agendamento_tolerancia_minutos`)
-para absorver o fato de o poll não bater exatamente em cima do minuto
-configurado.
+(`cron: '*/15 * * * *'`) e, a CADA execução, o worker perguntar ao banco se
+há trabalho a fazer; se não houver, sai sem gastar nenhuma chamada de API.
 
-A aritmética de virada de meia-noite é a parte fácil de errar: um horário
-configurado para 23:55 com "agora" às 00:02 BRT tem diferença real de 7
-minutos, não ~1433 — `_diferenca_minutos_circular` cuida disso tratando os
-1440 minutos do dia como um círculo (`min(diff, 1440 - diff)`).
+MODELO CATCH-UP (recuperação) — por que NÃO é mais uma janela de tolerância:
+o cron do GitHub Actions em repositório free NÃO é confiável. Medição real do
+histórico deste repo: dos 96 disparos/dia prometidos por `*/15`, chegam de 4 a
+7 — a plataforma descarta ~95% dos agendamentos de alta frequência e entrega o
+resto em horários imprevisíveis, com 1 a 3 horas entre execuções. A lógica
+antiga perguntava "o horário BRT de AGORA está a ±7 min de algum horário
+agendado?"; com ~5 polls/dia caindo em minutos aleatórios contra janelas que
+somavam 112 dos 1440 minutos do dia, a resposta era praticamente sempre não.
+Resultado medido: ZERO varreduras em 4 dias, todas as execuções logando "nada
+agendado para agora" — a automação inteira estava morta.
+
+A pergunta certa, então, não é "estou EM CIMA do horário?" e sim "algum
+horário PASSOU desde a última vez que eu rodei?" — o mesmo modelo do
+`Persistent=true` do systemd-timer ou do misfire handling do APScheduler.
+Isso é imune tanto a atraso quanto a disparo descartado: se o horário das
+09:00 passou e o próximo poll real só acontece às 11:37, a varredura acontece
+às 11:37. E cada horário dispara NO MÁXIMO uma vez por dia, porque a
+comparação é sempre contra a ocorrência MAIS RECENTE dele (nunca acumula N
+execuções atrasadas).
+
+O estado que sustenta isso é `HorarioAgendado.ultima_execucao` (UTC, tz-aware,
+NULL = nunca executou => devido). O fluxo do worker é: `horarios_devidos()` ->
+roda UMA varredura -> `marcar_executados()` com a lista devolvida.
+
+REFERENCIAL DE COMPARAÇÃO: tudo é comparado em UTC. `hora`/`minuto` do
+`HorarioAgendado` são BRT (UTC-3, sem lib de timezone — convenção do projeto),
+então a ocorrência é montada no calendário BRT e convertida de volta para UTC
+antes de ser comparada com `ultima_execucao`.
 """
 from __future__ import annotations
 
@@ -40,8 +59,6 @@ from voofacil.schedule_utils import parse_horarios
 # convenção usada em voofacil/schedule_utils.py, sem lib externa de timezone.
 _OFFSET_UTC_PARA_BRT_HORAS = 3
 
-_MINUTOS_POR_DIA = 24 * 60
-
 
 def _validar_hora_minuto(hora: int, minuto: int) -> None:
     if not (0 <= hora <= 23):
@@ -50,13 +67,33 @@ def _validar_hora_minuto(hora: int, minuto: int) -> None:
         raise ValueError(f"Minuto fora do intervalo válido (0-59): {minuto!r}")
 
 
-def _diferenca_minutos_circular(a: int, b: int) -> int:
-    """Diferença mínima (em minutos) entre dois instantes do dia (0-1439),
-    tratando o dia como um círculo — ou seja, considerando também a distância
-    "dando a volta" pela meia-noite. Ex.: a=1435 (23:55), b=2 (00:02) ->
-    diff bruto=1433, mas 1440-1433=7 é a distância real (a menor das duas)."""
-    diff = abs(a - b)
-    return min(diff, _MINUTOS_POR_DIA - diff)
+def _como_utc_aware(dt: datetime) -> datetime:
+    """Normaliza `dt` para UTC tz-aware.
+
+    Existe por causa de uma pegadinha real: comparar datetime naive com aware
+    levanta TypeError, e o SQLite devolve datetime NAIVE mesmo em colunas
+    declaradas `DateTime(timezone=True)` (ele não guarda offset). Como tudo que
+    este módulo grava está em UTC, um valor sem tzinfo é assumido como UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _ocorrencia_mais_recente_utc(hora: int, minuto: int, agora_utc: datetime) -> datetime:
+    """Instante (em UTC) da ocorrência MAIS RECENTE de HH:MM (BRT) até `agora`.
+
+    Ou seja: hoje às HH:MM no calendário BRT; se HH:MM ainda não chegou hoje,
+    ontem às HH:MM. É este instante que se compara com `ultima_execucao` —
+    daí a virada de meia-noite sair de graça, sem aritmética circular: às
+    00:10 BRT, a ocorrência mais recente de 23:50 é a de ONTEM, e a de 00:05 é
+    a de HOJE."""
+    # Deslocar o relógio em -3h dá o "calendário de parede" BRT (a tzinfo
+    # continua sendo UTC, é só um artifício aritmético — desfeito no fim).
+    agora_brt = agora_utc - timedelta(hours=_OFFSET_UTC_PARA_BRT_HORAS)
+    ocorrencia_brt = agora_brt.replace(hour=hora, minute=minuto, second=0, microsecond=0)
+    if ocorrencia_brt > agora_brt:
+        ocorrencia_brt -= timedelta(days=1)  # HH:MM ainda não chegou hoje
+    return ocorrencia_brt + timedelta(hours=_OFFSET_UTC_PARA_BRT_HORAS)
 
 
 def listar_horarios(
@@ -75,20 +112,36 @@ def listar_horarios(
 
 
 def criar_horario(session, tipo: str, hora: int, minuto: int) -> HorarioAgendado:
+    """Cria um horário JÁ CARIMBADO com o instante da criação.
+
+    O carimbo inicial não é decorativo: sem ele o horário nasceria com
+    `ultima_execucao=None`, que no modelo catch-up significa "nunca executou,
+    está devido" — e o próximo poll dispararia uma varredura completa na hora,
+    mesmo que o usuário tenha acabado de cadastrar 23:00 às 09:00 da manhã.
+    Carimbar na criação dá a semântica que se espera de um agendador: vale a
+    partir da PRÓXIMA ocorrência, não retroativamente.
+    """
     _validar_hora_minuto(hora, minuto)
-    h = HorarioAgendado(tipo=tipo, hora=hora, minuto=minuto, ativo=True)
+    h = HorarioAgendado(
+        tipo=tipo, hora=hora, minuto=minuto, ativo=True,
+        ultima_execucao=datetime.now(timezone.utc),
+    )
     session.add(h)
     session.commit()
     return h
 
 
 def atualizar_horario(session, horario_id: int, hora: int, minuto: int) -> HorarioAgendado:
+    """Muda o HH:MM de um horário, recarimbando-o (mesma razão de
+    `criar_horario`: editar 06:00 -> 07:00 às 09:00 não deve disparar uma
+    varredura imediata só porque a nova ocorrência de hoje já passou)."""
     _validar_hora_minuto(hora, minuto)
     h = session.get(HorarioAgendado, horario_id)
     if h is None:
         raise ValueError(f"HorarioAgendado {horario_id!r} não encontrado")
     h.hora = hora
     h.minuto = minuto
+    h.ultima_execucao = datetime.now(timezone.utc)
     session.commit()
     return h
 
@@ -134,25 +187,65 @@ def garantir_horarios_padrao(session) -> None:
         criar_horario(session, TipoHorario.EXPLORE.value, hora, minuto)
 
 
-def deve_rodar_agora(session, tipo: str, agora_utc: datetime | None = None) -> bool:
-    """True se, AGORA (horário BRT), algum `HorarioAgendado` ativo do `tipo`
-    pedido estiver dentro da janela de tolerância (`settings.
-    agendamento_tolerancia_minutos`). Usado pelo poll de frequência fixa
-    (GitHub Actions/daemon local) para decidir se vale a pena varrer/
-    explorar de verdade nesta execução, sem gastar chamada de API à toa.
+def horarios_devidos(
+    session, tipo: str, agora_utc: datetime | None = None
+) -> list[HorarioAgendado]:
+    """Horários ATIVOS do `tipo` que estão DEVIDOS agora (modelo catch-up).
 
-    `agora_utc` é opcional (default: `datetime.now(timezone.utc)`) — passar
-    um valor explícito é o que permite testar a virada de meia-noite de
-    forma determinística."""
+    Um horário está devido quando a sua ocorrência mais recente (hoje às HH:MM
+    em BRT, ou ontem às HH:MM se HH:MM ainda não chegou hoje) é POSTERIOR ao
+    seu `ultima_execucao`. `ultima_execucao` NULL significa "nunca executou" e
+    portanto está sempre devido.
+
+    A comparação é estrita (`ocorrência > ultima_execucao`): ter executado
+    exatamente no instante da ocorrência já conta como executado, e um horário
+    nunca dispara duas vezes pela mesma ocorrência.
+
+    `agora_utc` é opcional (default: `datetime.now(timezone.utc)`) — passar um
+    valor explícito é o que permite testar a virada de meia-noite e o poll
+    atrasado de forma determinística. Ordenação: (hora, minuto), herdada de
+    `listar_horarios`."""
     if agora_utc is None:
         agora_utc = datetime.now(timezone.utc)
+    agora_utc = _como_utc_aware(agora_utc)
 
-    agora_brt = agora_utc - timedelta(hours=_OFFSET_UTC_PARA_BRT_HORAS)
-    agora_total_min = agora_brt.hour * 60 + agora_brt.minute
-
+    devidos: list[HorarioAgendado] = []
     for h in listar_horarios(session, tipo):
-        horario_total_min = h.hora * 60 + h.minuto
-        diff = _diferenca_minutos_circular(horario_total_min, agora_total_min)
-        if diff <= settings.agendamento_tolerancia_minutos:
-            return True
-    return False
+        if h.ultima_execucao is None:
+            devidos.append(h)  # nunca executou => devido
+            continue
+        ocorrencia = _ocorrencia_mais_recente_utc(h.hora, h.minuto, agora_utc)
+        if ocorrencia > _como_utc_aware(h.ultima_execucao):
+            devidos.append(h)
+    return devidos
+
+
+def marcar_executados(
+    session, horarios: list[HorarioAgendado], agora_utc: datetime | None = None
+) -> None:
+    """Carimba `ultima_execucao = agora_utc` em cada horário da lista e commita.
+
+    Chamado pelo worker DEPOIS de rodar a varredura/explore de verdade — é o
+    que fecha o ciclo do catch-up e impede que a mesma ocorrência dispare de
+    novo no próximo poll."""
+    if not horarios:
+        return  # nada a fazer — evita um commit inútil (round-trip no Neon)
+    if agora_utc is None:
+        agora_utc = datetime.now(timezone.utc)
+    agora_utc = _como_utc_aware(agora_utc)
+
+    for h in horarios:
+        h.ultima_execucao = agora_utc
+        # Reanexa objetos que venham de uma sessão já fechada (o worker lê os
+        # horários numa sessão e pode gravar em outra); em objeto já presente
+        # nesta sessão, `add` é no-op.
+        session.add(h)
+    session.commit()
+
+
+def deve_rodar_agora(session, tipo: str, agora_utc: datetime | None = None) -> bool:
+    """True se houver ALGUM horário devido do `tipo` — açúcar sobre
+    `horarios_devidos`, mantido por compatibilidade com quem só precisa do
+    sim/não. NÃO usa mais janela de tolerância: ver o modelo catch-up
+    explicado no topo do módulo."""
+    return bool(horarios_devidos(session, tipo, agora_utc))
