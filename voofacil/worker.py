@@ -81,12 +81,93 @@ _DIAS_PY_WEEKDAY = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 JITTER_SEGUNDOS = 60  # pequeno jitter no poll do daemon local (o poll já é frequente)
 MESES_EXPLORE_A_FRENTE = 3         # quantos meses da janela do watch explorar por dia
+# Teto de segurança de candidatos por watch numa MESMA varredura (ver
+# deduplicar_candidatos). 3 é folgado para um bot pessoal e cabe com sobra no
+# teto diário da SerpApi (settings.serpapi_orcamento_dia, padrão 8), que é
+# consumido também pelo sweep multi-fonte e pelo Explore.
+TETO_CANDIDATOS_POR_WATCH = 3
 
 
 @dataclass
 class ResultadoVarredura:
     snapshots_por_watch: dict[int, int] = field(default_factory=dict)
     candidatos: list[Candidato] = field(default_factory=list)
+
+
+def _chave_viagem(cand: Candidato) -> tuple:
+    """Identidade da VIAGEM de um candidato — o que a deduplicação trata como
+    "o mesmo": watch, rota e as duas datas."""
+    q = cand.quote
+    return (cand.watch_id, q.origem, q.destino, q.data_ida, q.data_volta)
+
+
+def _resumo_candidatos(candidatos: list[Candidato]) -> str:
+    """Linha legível de candidatos para log ("LIS 2027-05-07/2027-05-22 R$ 3200 (LIMITE, TP_CACHE)")."""
+    return "; ".join(
+        f"{c.quote.origem}->{c.quote.destino} {c.quote.data_ida}"
+        f"{'/' + str(c.quote.data_volta) if c.quote.data_volta else ''}"
+        f" R$ {c.quote.preco} ({c.gatilho}, {c.quote.fonte})"
+        for c in candidatos
+    )
+
+
+def deduplicar_candidatos(
+    candidatos: list[Candidato], teto_por_watch: int = TETO_CANDIDATOS_POR_WATCH
+) -> list[Candidato]:
+    """Reduz os candidatos de UMA varredura antes de confirmar/alertar.
+
+    Por que existe: `avaliar_snapshot` consulta o cooldown na tabela `alerta`,
+    que só é escrita lá na frente por `despachar` — dentro da mesma varredura
+    não havia deduplicação nenhuma, cada snapshot virava um candidato
+    independente. Medido: watch GRU->LIS com limite 3500 e um mês de calendar
+    (30 cotações), banco vazio antes => 10 candidatos numa única varredura,
+    todos LIMITE. Isso seriam 10 chamadas SerpApi (o teto diário é 8) e 10
+    mensagens POR CANAL. Num watch REGIAO com 18 destinos escala para centenas.
+
+    Duas etapas:
+    1. mesma viagem (`_chave_viagem`) coletada mais de uma vez na rodada — o
+       caso típico é a mesma rota/dia vindo de TP_CACHE e de SERPAPI no sweep
+       multi-fonte — colapsa no candidato MAIS BARATO;
+    2. teto de segurança por watch: sobram os `teto_por_watch` mais baratos.
+
+    O corte NUNCA é silencioso: o que ficou de fora sai no log com rota, datas,
+    preço e gatilho, para que "não recebi alerta daquele dia" tenha resposta.
+    """
+    if not candidatos:
+        return []
+
+    melhores: dict[tuple, Candidato] = {}
+    for cand in candidatos:
+        chave = _chave_viagem(cand)
+        atual = melhores.get(chave)
+        if atual is None or cand.quote.preco < atual.quote.preco:
+            melhores[chave] = cand
+    if len(melhores) < len(candidatos):
+        log.info(
+            "Deduplicação de candidatos: %s -> %s (mesma viagem vista mais de uma "
+            "vez na rodada; ficou a cotação mais barata de cada uma)",
+            len(candidatos), len(melhores),
+        )
+
+    por_watch: dict[int, list[Candidato]] = {}
+    for cand in melhores.values():
+        por_watch.setdefault(cand.watch_id, []).append(cand)
+
+    resultado: list[Candidato] = []
+    for watch_id in sorted(por_watch):
+        ordenados = sorted(
+            por_watch[watch_id], key=lambda c: (c.quote.preco, c.quote.data_ida)
+        )
+        if len(ordenados) > teto_por_watch:
+            cortados = ordenados[teto_por_watch:]
+            log.warning(
+                "Teto de %s candidato(s) por varredura atingido no watch %s — %s "
+                "candidato(s) mais caros NÃO viraram alerta: %s",
+                teto_por_watch, watch_id, len(cortados), _resumo_candidatos(cortados),
+            )
+            ordenados = ordenados[:teto_por_watch]
+        resultado.extend(ordenados)
+    return resultado
 
 
 def executar_varredura(session, providers: list[Provider]) -> ResultadoVarredura:
@@ -117,6 +198,7 @@ def executar_varredura(session, providers: list[Provider]) -> ResultadoVarredura
                     resultado.candidatos.append(candidato)
         resultado.snapshots_por_watch[watch.id] = total
         log.info("Watch %s (%s): %s snapshots", watch.id, watch.nome, total)
+    resultado.candidatos = deduplicar_candidatos(resultado.candidatos)
     return resultado
 
 
@@ -223,6 +305,7 @@ def executar_explore(session, provider: SerpApiProvider) -> ResultadoVarredura:
                     resultado.candidatos.append(candidato)
         resultado.snapshots_por_watch[watch.id] = total
         log.info("Explore watch %s (%s): %s destinos descobertos", watch.id, watch.nome, total)
+    resultado.candidatos = deduplicar_candidatos(resultado.candidatos)
     return resultado
 
 

@@ -9,12 +9,30 @@ risco da coleta) — usado com parcimônia:
 
 Free tier: 250 buscas/mês (50/hora). O orçamento é controlado via
 ContadorApi (tabela `contador_api`) — ver orcamento.py.
+
+CÓDIGO DE CIDADE x CÓDIGO DE AEROPORTO (causa raiz medida em 29/07/2026 do
+"Google Flights hasn't returned any results" que zerou a produção): o painel
+deixa o usuário escolher uma CIDADE no autocomplete ("RIO — Rio de Janeiro
+(qualquer aeroporto)"), e o Google Flights NÃO entende códigos IATA
+metropolitanos. Reproduzido com a chave real, mesmas datas do watch do
+usuário (07/05/2027 -> 22/05/2027):
+
+    departure_id=RIO      -> 0 voos + erro "hasn't returned any results"
+    departure_id=GIG      -> 9 voos, mais barato R$ 5.426
+    departure_id=GIG,SDU  -> 11 voos, mais barato R$ 5.426 (origens GIG e SDU)
+
+A SerpApi aceita vários aeroportos separados por vírgula em
+departure_id/arrival_id — é o que CIDADES_MULTI_AEROPORTO faz aqui, o que
+preserva a intenção "qualquer aeroporto da cidade" em vez de escolher um.
+A cotação devolvida mantém o código que o usuário cadastrou (RIO), não o
+aeroporto expandido.
 """
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
@@ -27,9 +45,42 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://serpapi.com/search"
 
+# Noites usadas quando o watch é ida-e-volta mas não diz nada sobre a volta
+# (sem janela de desembarque e sem duração) — mantém o comportamento histórico.
+NOITES_PADRAO = 7
+
+# Códigos IATA METROPOLITANOS (cidade com mais de um aeroporto) -> aeroportos
+# reais, separados por vírgula como a SerpApi espera. Só entram aqui códigos
+# que NÃO são também um aeroporto; um código desconhecido passa intacto.
+CIDADES_MULTI_AEROPORTO = {
+    "RIO": "GIG,SDU",           # Rio de Janeiro
+    "SAO": "GRU,CGH,VCP",       # São Paulo
+    "BHZ": "CNF,PLU",           # Belo Horizonte
+    "BUE": "EZE,AEP",           # Buenos Aires
+    "NYC": "JFK,EWR,LGA",       # Nova York
+    "WAS": "IAD,DCA,BWI",       # Washington
+    "CHI": "ORD,MDW",           # Chicago
+    "YTO": "YYZ,YTZ",           # Toronto
+    "LON": "LHR,LGW,STN,LTN,LCY",   # Londres
+    "PAR": "CDG,ORY,BVA",       # Paris
+    "MIL": "MXP,LIN,BGY",       # Milão
+    "ROM": "FCO,CIA",           # Roma
+    "STO": "ARN,BMA,NYO",       # Estocolmo
+    "MOW": "SVO,DME,VKO",       # Moscou
+    "TYO": "HND,NRT",           # Tóquio
+    "OSA": "KIX,ITM",           # Osaka
+    "SEL": "ICN,GMP",           # Seul
+    "BJS": "PEK,PKX",           # Pequim
+}
+
 
 class SerpApiError(RuntimeError):
     pass
+
+
+def _ids_busca(codigo: str) -> str:
+    """'RIO' -> 'GIG,SDU'. Código desconhecido (ou já de aeroporto) passa intacto."""
+    return CIDADES_MULTI_AEROPORTO.get((codigo or "").upper(), codigo)
 
 
 def _parse_price_insights_date(valor: str | None) -> date | None:
@@ -39,6 +90,34 @@ def _parse_price_insights_date(valor: str | None) -> date | None:
         return datetime.strptime(valor, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def _preco_numerico(valor) -> Decimal | None:
+    """Decimal positivo, ou None se o campo vier nulo/não numérico.
+
+    Existe porque `min(voos, key=lambda v: v.get("price", inf))` explodia com
+    TypeError quando algum voo trazia "price": null — a resposta inteira era
+    perdida por causa de um item.
+    """
+    if valor is None or isinstance(valor, bool):
+        return None
+    try:
+        preco = Decimal(str(valor))
+    except (InvalidOperation, ValueError):
+        return None
+    return preco if preco > 0 else None
+
+
+def _primeiro_dia_do_mes(mes: int, hoje: date | None = None) -> date:
+    """1º dia da PRÓXIMA ocorrência do mês `mes` (1-12).
+
+    Usar sempre o ano corrente colocava a data no PASSADO na virada do ano
+    (em dez/2026, mes=1 virava 2026-01-01), e `atende_criterios` descartava
+    a descoberta inteira depois de a chamada já ter sido cobrada.
+    """
+    hoje = hoje or date.today()
+    ano = hoje.year if mes >= hoje.month else hoje.year + 1
+    return date(ano, mes, 1)
 
 
 def _data_alvo(tipo: str | None, ini: date, fim: date | None) -> date:
@@ -58,6 +137,101 @@ def _data_alvo(tipo: str | None, ini: date, fim: date | None) -> date:
     return ini + (fim - ini) // 2
 
 
+def _janela_aceita(
+    tipo: str | None, ini: date | None, fim: date | None, flexibilidade_dias: int | None
+) -> tuple[date, date] | None:
+    """Intervalo [lo, hi] de datas que `voofacil.engine.filtros` vai ACEITAR.
+
+    Espelha `_bate_janela_data` da engine: EXATA vira um ponto, APROXIMADA
+    vira ± flexibilidade_dias em torno de `ini`, INTERVALO vira [ini, fim].
+    None = o watch não define essa janela (nada a reconciliar).
+    """
+    if ini is None and fim is None:
+        return None
+    ini = ini if ini is not None else fim
+    if tipo == TipoData.EXATA.value:
+        return ini, ini
+    if tipo == TipoData.APROXIMADA.value:
+        folga = timedelta(days=abs(flexibilidade_dias or 0))
+        return ini - folga, ini + folga
+    hi = fim if fim is not None and fim >= ini else ini
+    return ini, hi
+
+
+def _entre(valor: date, lo: date, hi: date) -> date:
+    return min(max(valor, lo), hi)
+
+
+def _datas_da_busca(watch: Watch) -> tuple[date, date | None] | None:
+    """(data_ida, data_volta) da chamada de cota, JÁ reconciliadas com TODOS os
+    critérios do watch. None = os critérios são incompatíveis entre si e
+    nenhuma combinação passaria por `atende_criterios` — não chame a API.
+
+    Antes, a ida saía de `_data_alvo` (meio da janela) e a volta de
+    "duracao_min or duracao_max or 7", sem olhar um para o outro nem para a
+    janela de desembarque. Resultado medido pela auditoria: janela de ida
+    01-30/09, janela de volta 20-28/09, duração 14-21 noites produziam
+    outbound=15/09 + return=24/09 (9 noites) — `atende_criterios` reprovava
+    SEMPRE, e 1 das 8 chamadas diárias ia para o lixo em toda varredura.
+
+    O cálculo agora é geométrico e feito de uma vez:
+      ida  ∈ janela_de_ida ∩ [volta_lo - duracao_max, volta_hi - duracao_min]
+      volta ∈ janela_de_volta ∩ [ida + duracao_min, ida + duracao_max]
+    A ida preferida (`_data_alvo`) é encaixada nesse intervalo viável em vez de
+    ser imposta: com janela de ida do tipo INTERVALO o usuário É flexível na
+    ida, então deslizar 15/09 -> 14/09 para caber na volta 28/09 (14 noites)
+    coleta dado em vez de desistir. Com ida EXATA/APROXIMADA o intervalo viável
+    já é estreito e o encaixe não pode sair dele — se ficar vazio, devolve None.
+    """
+    janela_ida = _janela_aceita(
+        watch.tipo_data_ida, watch.data_ini, watch.data_fim, watch.flexibilidade_dias
+    )
+    if janela_ida is None:
+        return None
+    ida_pref = _data_alvo(watch.tipo_data_ida, watch.data_ini, watch.data_fim)
+
+    if not watch.ida_volta:
+        return _entre(ida_pref, *janela_ida), None
+
+    dmin = watch.duracao_min if watch.duracao_min is not None else 0
+    dmax = watch.duracao_max
+    if dmax is not None and dmax < dmin:
+        return None
+
+    janela_volta = _janela_aceita(
+        watch.tipo_data_volta, watch.data_volta_ini, watch.data_volta_fim,
+        watch.flexibilidade_dias,
+    )
+    if janela_volta is None:
+        # Sem janela de desembarque: o retorno é derivado da duração, como antes.
+        ida = _entre(ida_pref, *janela_ida)
+        noites = watch.duracao_min or watch.duracao_max or NOITES_PADRAO
+        if dmax is not None:
+            noites = min(noites, dmax)
+        return ida, ida + timedelta(days=max(noites, 0))
+
+    volta_lo, volta_hi = janela_volta
+    ida_lo, ida_hi = janela_ida
+    if dmax is not None:
+        ida_lo = max(ida_lo, volta_lo - timedelta(days=dmax))
+    ida_hi = min(ida_hi, volta_hi - timedelta(days=dmin))
+    if ida_lo > ida_hi:
+        return None                      # nenhuma ida admite uma volta válida
+
+    ida = _entre(ida_pref, ida_lo, ida_hi)
+    volta_lo = max(volta_lo, ida + timedelta(days=dmin))
+    if dmax is not None:
+        volta_hi = min(volta_hi, ida + timedelta(days=dmax))
+    if volta_lo > volta_hi:
+        return None
+    volta_pref = _data_alvo(
+        watch.tipo_data_volta,
+        watch.data_volta_ini if watch.data_volta_ini is not None else volta_lo,
+        watch.data_volta_fim,
+    )
+    return ida, _entre(volta_pref, volta_lo, volta_hi)
+
+
 class SerpApiProvider:
     nome = "SERPAPI"
 
@@ -69,29 +243,50 @@ class SerpApiProvider:
     def configurado(self) -> bool:
         return bool(self.api_key)
 
-    def _get(self, params: dict) -> dict:
+    def _get(self, params: dict, ao_cobrar: Callable[[], None] | None = None) -> dict:
+        """GET na SerpApi. `ao_cobrar` é chamado assim que o HTTP 200 volta.
+
+        A contabilização precisa acontecer AQUI, e não depois do parsing: a
+        SerpApi cobra a busca no momento em que ela é concluída com sucesso —
+        inclusive quando o corpo traz `error: "Google Flights hasn't returned
+        any results"` (o `search_metadata.status` desse corpo é "Success",
+        verificado ao vivo). Contabilizar só depois de montar o PriceQuote
+        fazia toda falha pós-HTTP (erro no corpo, JSON inválido, ValidationError)
+        gastar cota real e deixar o contador em zero — o orçamento passava a
+        mentir justamente no dia em que a API estivesse com problema.
+        """
         if not self.api_key:
             raise SerpApiError("SERPAPI_KEY ausente — configure no .env")
         # URL absoluta: ignora qualquer base_url do client (evita ambiguidade de barra final)
         resp = self._client.get(BASE_URL, params={**params, "api_key": self.api_key})
         resp.raise_for_status()
+        if ao_cobrar is not None:
+            ao_cobrar()
         corpo = resp.json()
         if corpo.get("error"):
             raise SerpApiError(str(corpo["error"]))
         return corpo
 
     def confirmar_google_flights(
-        self, origem: str, destino: str, data_ida: date, data_volta: date | None = None
+        self,
+        origem: str,
+        destino: str,
+        data_ida: date,
+        data_volta: date | None = None,
+        ao_cobrar: Callable[[], None] | None = None,
     ) -> PriceQuote | None:
         """Confirma o preço AO VIVO de um itinerário específico (engine=google_flights).
 
         Usado só quando um candidato já cruzou um gatilho no cache da
         Travelpayouts — 1 chamada, não uma varredura.
+
+        `ao_cobrar` (opcional) é disparado assim que a chamada HTTP volta 200,
+        antes de qualquer parsing — ver `_get`.
         """
         params = {
             "engine": "google_flights",
-            "departure_id": origem,
-            "arrival_id": destino,
+            "departure_id": _ids_busca(origem),
+            "arrival_id": _ids_busca(destino),
             "outbound_date": data_ida.isoformat(),
             "type": "1" if data_volta else "2",   # 1=ida-e-volta, 2=só ida
             "currency": settings.moeda_padrao,
@@ -101,14 +296,18 @@ class SerpApiProvider:
         if data_volta:
             params["return_date"] = data_volta.isoformat()
 
-        corpo = self._get(params)
-        voos = corpo.get("best_flights") or corpo.get("other_flights") or []
+        corpo = self._get(params, ao_cobrar)
+        brutos = corpo.get("best_flights") or corpo.get("other_flights") or []
+        # Filtra ANTES do min(): um voo com "price": null fazia o min() comparar
+        # None com float e derrubar a resposta inteira (TypeError).
+        voos = [
+            (v, _preco_numerico(v.get("price")))
+            for v in brutos if isinstance(v, dict)
+        ]
+        voos = [(v, p) for v, p in voos if p is not None]
         if not voos:
             return None
-        mais_barato = min(voos, key=lambda v: v.get("price", float("inf")))
-        preco = mais_barato.get("price")
-        if not preco:
-            return None
+        mais_barato, preco = min(voos, key=lambda par: par[1])
 
         pernas = mais_barato.get("flights") or []
         cia = pernas[0].get("airline") if pernas else None
@@ -129,40 +328,57 @@ class SerpApiProvider:
         )
 
     def explorar_regiao(
-        self, origem: str, arrival_area_id: str, mes: int
+        self, origem: str, arrival_area_id: str, mes: int,
+        ao_cobrar: Callable[[], None] | None = None,
     ) -> list[PriceQuote]:
         """Busca ampla: origem -> região/país inteiro num mês (engine=google_travel_explore).
 
         `arrival_area_id` é o kgmid do Google (ex.: /m/02j9z para Europa).
+        Cada destino é montado isoladamente: um item malformado (IATA com
+        menos de 3 letras, preço fora do contrato) levantava ValidationError e
+        derrubava a resposta INTEIRA, jogando fora dezenas de destinos válidos
+        de uma chamada que já tinha sido cobrada.
         """
         params = {
             "engine": "google_travel_explore",
-            "departure_id": origem,
+            "departure_id": _ids_busca(origem),
             "arrival_area_id": arrival_area_id,
             "month": mes,
             "currency": settings.moeda_padrao,
             "gl": "br",
             "hl": "pt-br",
         }
-        corpo = self._get(params)
+        corpo = self._get(params, ao_cobrar)
         quotes = []
-        for destino in corpo.get("destinations", []):
-            preco = destino.get("price")
-            iata = destino.get("airport_code") or destino.get("id")
-            if not preco or not iata:
+        descartados = 0
+        for destino in corpo.get("destinations", []) or []:
+            if not isinstance(destino, dict):
+                descartados += 1
                 continue
-            quotes.append(
-                PriceQuote(
-                    origem=origem,
-                    destino=str(iata)[:3].upper(),
-                    data_ida=_parse_price_insights_date(destino.get("date"))
-                    or date(date.today().year, mes, 1),
-                    preco=Decimal(str(preco)),
-                    moeda=settings.moeda_padrao,
-                    fonte=self.nome,
-                    deep_link=destino.get("link"),
+            preco = _preco_numerico(destino.get("price"))
+            iata = destino.get("airport_code") or destino.get("id")
+            if preco is None or not iata:
+                descartados += 1
+                continue
+            try:
+                quotes.append(
+                    PriceQuote(
+                        origem=origem,
+                        destino=str(iata)[:3].upper(),
+                        data_ida=_parse_price_insights_date(destino.get("date"))
+                        or _primeiro_dia_do_mes(mes),
+                        preco=preco,
+                        moeda=settings.moeda_padrao,
+                        fonte=self.nome,
+                        deep_link=destino.get("link"),
+                    )
                 )
-            )
+            except Exception as exc:  # noqa: BLE001 — 1 destino ruim não invalida os outros
+                descartados += 1
+                log.warning("Destino ignorado no Explore (%s): %s", iata, exc)
+        if descartados:
+            log.info("Explore %s: %s destinos aproveitados, %s descartados",
+                     origem, len(quotes), descartados)
         return quotes
 
     # ---------- Contrato Provider (varredura multi-fonte) ----------
@@ -183,13 +399,12 @@ class SerpApiProvider:
         N varreduras/dia x N dias de janela estouraria o free tier de
         250/mês em poucos watches; o teto diário adicional
         (ha_orcamento_serpapi, ver voofacil/engine/orcamento.py) protege
-        contra isso mesmo quando o mês ainda tem folga. A data usada é
-        escolhida por
-        `_data_alvo` (ver docstring lá): a própria data-alvo do watch
-        quando EXATA/APROXIMADA, ou o meio da janela quando INTERVALO.
-        A data de volta segue a mesma lógica sobre a janela de desembarque
-        (data_volta_ini/fim) quando ela existe; senão é derivada de
-        duracao_min (ou 7 noites, default) a partir da data de ida escolhida.
+        contra isso mesmo quando o mês ainda tem folga. O par (ida, volta) é
+        escolhido por `_datas_da_busca` (ver docstring lá), que reconcilia a
+        janela de embarque, a janela de desembarque e a faixa de duração —
+        e devolve None quando esses critérios são incompatíveis entre si, caso
+        em que a chamada NÃO é feita (a cota fica preservada em vez de comprar
+        um resultado que `atende_criterios` reprovaria).
 
         `session` é opcional: o contrato genérico `Provider.sweep(watch)`
         (usado por `executar_varredura` em worker.py) não passa sessão.
@@ -203,16 +418,19 @@ class SerpApiProvider:
         if not self.configurado:
             return []
 
-        data_ida = _data_alvo(watch.tipo_data_ida, watch.data_ini, watch.data_fim)
-        data_volta = None
-        if watch.ida_volta:
-            if watch.data_volta_ini is not None:
-                data_volta = _data_alvo(
-                    watch.tipo_data_volta, watch.data_volta_ini, watch.data_volta_fim
-                )
-            else:
-                noites = watch.duracao_min or watch.duracao_max or 7
-                data_volta = data_ida + timedelta(days=noites)
+        datas = _datas_da_busca(watch)
+        if datas is None:
+            log.warning(
+                "Watch %s (%s): critérios de data INCOMPATÍVEIS — embarque %s [%s..%s], "
+                "desembarque %s [%s..%s], duração %s-%s noites. Nenhum par ida/volta "
+                "satisfaz o watch, então a chamada SerpApi NÃO foi feita (1 das %s "
+                "chamadas diárias preservada). Ajuste as datas ou a duração no painel.",
+                watch.id, watch.nome, watch.tipo_data_ida, watch.data_ini, watch.data_fim,
+                watch.tipo_data_volta, watch.data_volta_ini, watch.data_volta_fim,
+                watch.duracao_min, watch.duracao_max, settings.serpapi_orcamento_dia,
+            )
+            return []
+        data_ida, data_volta = datas
 
         sessao_propria = session is None
         if sessao_propria:
@@ -224,16 +442,25 @@ class SerpApiProvider:
                 log.info("Orçamento SerpApi esgotado (mensal ou diário) — sweep de rota pulado (watch %s)", watch.id)
                 return []
             try:
+                # A contabilização vai por callback (disparado no HTTP 200, antes
+                # do parsing): se o corpo vier com erro ou o parsing falhar, a
+                # chamada já foi cobrada pela SerpApi e precisa constar no contador.
                 quote = self.confirmar_google_flights(
-                    watch.origem_iata, watch.destino_iata, data_ida, data_volta
+                    watch.origem_iata, watch.destino_iata, data_ida, data_volta,
+                    ao_cobrar=lambda: registrar_chamada_serpapi(session),
                 )
-                registrar_chamada_serpapi(session)
             except Exception:  # noqa: BLE001 — 1 falha no sweep multi-fonte não derruba a varredura
                 log.exception("Falha no sweep SerpApi (varredura regular) do watch %s", watch.id)
                 return []
-            if sessao_propria:
-                session.commit()
             return [quote] if quote else []
         finally:
             if sessao_propria:
-                session.close()
+                # Commit no finally (não no caminho feliz): a contabilização de uma
+                # chamada que falhou DEPOIS do HTTP 200 também precisa ser gravada.
+                try:
+                    session.commit()
+                except Exception:  # noqa: BLE001
+                    session.rollback()
+                    log.exception("Falha ao gravar o consumo SerpApi do watch %s", watch.id)
+                finally:
+                    session.close()

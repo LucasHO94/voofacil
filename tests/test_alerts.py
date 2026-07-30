@@ -55,6 +55,19 @@ def test_fmt_brl():
     assert fmt_brl(Decimal("1234567.89")) == "R$ 1.234.567,89"
 
 
+def _candidato_escalas(watch_id: int, escalas):
+    """Candidato igual ao `_candidato`, mas com `escalas` controlável (inclusive
+    None) para exercitar o ramo de exibição de paradas (D15)."""
+    return Candidato(
+        quote=PriceQuote(
+            origem="GRU", destino="LIS",
+            data_ida=date(2026, 9, 15), data_volta=date(2026, 9, 29),
+            preco=Decimal("2890.00"), cia="LA", escalas=escalas, fonte="TP_CACHE",
+        ),
+        watch_id=watch_id, snapshot_id=1, gatilho="LIMITE",
+    )
+
+
 def test_montar_mensagem_conteudo(session):
     w = _watch(session)
     msg = montar_mensagem(_candidato(w.id), w)
@@ -66,6 +79,34 @@ def test_montar_mensagem_conteudo(session):
     assert "cache" in msg.html                 # não confirmado ao vivo
     assert msg.deep_link.endswith("GRU1509LIS29091")
     assert "LIMITE" in msg.assunto
+
+
+def test_montar_mensagem_escalas_zero_e_direto(session):
+    """escalas == 0 é o único caso em que podemos afirmar 'direto'."""
+    w = _watch(session)
+    msg = montar_mensagem(_candidato_escalas(w.id, 0), w)
+
+    assert "direto" in msg.html
+    assert "não informadas" not in msg.html
+
+
+def test_montar_mensagem_escalas_none_nao_afirma_direto(session):
+    """D15: escalas == None (a fonte não reportou) NÃO pode virar 'voo direto' —
+    é um fato não verificado. Deve dizer que a informação não veio."""
+    w = _watch(session)
+    msg = montar_mensagem(_candidato_escalas(w.id, None), w)
+
+    assert "escalas não informadas" in msg.html
+    # não pode afirmar direto: procura o rótulo isolado " · direto"
+    assert " · direto" not in msg.html
+
+
+def test_montar_mensagem_escalas_positivas(session):
+    w = _watch(session)
+    msg = montar_mensagem(_candidato_escalas(w.id, 2), w)
+
+    assert "2 escala(s)" in msg.html
+    assert "direto" not in msg.html
 
 
 @respx.mock

@@ -44,7 +44,17 @@ def montar_mensagem(candidato: Candidato, watch: Watch) -> Mensagem:
     if candidato.baseline_min is not None:
         linhas.append(f"Menor preço registrado até hoje: {fmt_brl(candidato.baseline_min)}")
     if q.cia:
-        linhas.append(f"Cia: {q.cia}" + (f" · {q.escalas} escala(s)" if q.escalas else " · direto"))
+        # D15: `escalas` None (a fonte não reportou paradas) é DIFERENTE de 0
+        # (voo direto de verdade). Antes ambos caíam no ramo "direto" e o alerta
+        # afirmava voo direto sem ter o dado — um fato não verificado. Agora só
+        # dizemos "direto" quando escalas == 0; None vira "escalas não informadas".
+        if q.escalas is None:
+            escalas_txt = " · escalas não informadas"
+        elif q.escalas == 0:
+            escalas_txt = " · direto"
+        else:
+            escalas_txt = f" · {q.escalas} escala(s)"
+        linhas.append(f"Cia: {q.cia}{escalas_txt}")
     if candidato.confirmado_ao_vivo:
         linhas.append("✔️ Preço confirmado ao vivo agora")
     else:

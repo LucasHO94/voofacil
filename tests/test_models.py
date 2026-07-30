@@ -3,6 +3,8 @@ import json
 from datetime import date
 from decimal import Decimal
 
+from sqlalchemy import select
+
 from voofacil.models import (
     Alerta,
     FonteSnapshot,
@@ -129,6 +131,55 @@ def test_snapshot_e_alerta_vinculados(session):
     assert w.snapshots[0].preco == Decimal("3123.45")
     assert w.alertas[0].gatilho == "LIMITE"
     assert w.alertas[0].snapshot.deep_link.startswith("https://")
+
+
+def test_excluir_watch_cascateia_snapshots_e_alertas(session):
+    """Regressão do bloqueador D1.
+
+    Sem `cascade="all, delete-orphan"` nas relationships, `session.delete(w)`
+    tentava UPDATE price_snapshot SET watch_id = NULL (coluna NOT NULL) e
+    estourava IntegrityError — que no painel deixava a Session em
+    PendingRollbackError para o resto da vida da aba.
+    """
+    w = _watch_rota()
+    session.add(w)
+    session.flush()
+    snap = PriceSnapshot(
+        watch_id=w.id, origem="GRU", destino="LIS", data_ida=date(2026, 9, 10),
+        preco=Decimal("3100.00"), fonte=FonteSnapshot.TP_CACHE.value,
+    )
+    session.add(snap)
+    session.flush()
+    session.add(Alerta(watch_id=w.id, snapshot_id=snap.id,
+                       gatilho=Gatilho.LIMITE.value, preco=snap.preco, canal="TELEGRAM"))
+    session.commit()
+    wid = w.id
+
+    session.delete(w)
+    session.commit()   # não pode levantar IntegrityError
+
+    assert session.get(Watch, wid) is None
+    assert session.scalars(select(PriceSnapshot)).all() == []
+    assert session.scalars(select(Alerta)).all() == []
+
+
+def test_remover_snapshot_da_colecao_apaga_orfao(session):
+    """delete-orphan: snapshot tirado de `w.snapshots` some do banco em vez de
+    virar linha órfã com watch_id NULL."""
+    w = _watch_rota()
+    session.add(w)
+    session.flush()
+    snap = PriceSnapshot(
+        watch_id=w.id, origem="GRU", destino="LIS", data_ida=date(2026, 9, 10),
+        preco=Decimal("3100.00"), fonte=FonteSnapshot.TP_CACHE.value,
+    )
+    session.add(snap)
+    session.commit()
+
+    w.snapshots.remove(snap)
+    session.commit()
+
+    assert session.scalars(select(PriceSnapshot)).all() == []
 
 
 def test_preco_e_decimal_nao_float(session):

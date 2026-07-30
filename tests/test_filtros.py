@@ -129,6 +129,15 @@ def test_data_volta_sem_janela_nao_filtra(session):
     assert atende_criterios(w, q) is True
 
 
+def test_data_volta_so_com_limite_superior_filtra(session):
+    """Janela aberta à esquerda (só data_volta_fim): o teto tem de valer.
+    Antes caía no atalho `ini is None -> True` e não filtrava nada — "voltar
+    até 28/09" aceitava uma volta em dezembro."""
+    w = _watch(session, data_volta_ini=None, data_volta_fim=date(2026, 9, 28))
+    assert atende_criterios(w, _quote(data_volta=date(2026, 9, 24))) is True
+    assert atende_criterios(w, _quote(data_volta=date(2026, 12, 31))) is False
+
+
 # --- mês específico (isolado da janela de data via range amplo) ---
 
 def test_mes_especifico_bate(session):

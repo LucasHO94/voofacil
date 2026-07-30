@@ -1,10 +1,10 @@
 """Testes da engine: persistência de quotes, baseline e varredura do worker."""
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
-from voofacil.engine.baseline import baseline_rota
+from voofacil.engine.baseline import baseline_comparavel, baseline_rota
 from voofacil.engine.store import persistir_quotes
-from voofacil.models import PriceSnapshot, TipoWatch, Watch
+from voofacil.models import PriceSnapshot, TipoWatch, Watch, utcnow
 from voofacil.schemas import PriceQuote
 from voofacil.worker import executar_varredura
 
@@ -25,13 +25,15 @@ def _watch(session, **kw):
     return w
 
 
-def _quote(preco: str, dia: int = 10, mes: int = 9) -> PriceQuote:
+def _quote(preco: str, dia: int = 10, mes: int = 9, volta: int | None = None,
+           fonte: str = "TP_CACHE") -> PriceQuote:
     return PriceQuote(
         origem="GRU",
         destino="LIS",
         data_ida=date(2026, mes, dia),
+        data_volta=date(2026, mes, volta) if volta else None,
         preco=Decimal(preco),
-        fonte="TP_CACHE",
+        fonte=fonte,
     )
 
 
@@ -104,6 +106,75 @@ def test_baseline_exclui_snapshot_avaliado(session):
 
 def test_baseline_sem_historico_retorna_none(session):
     assert baseline_rota(session, "GRU", "XXX") is None
+
+
+def test_baseline_conta_rodadas_de_coleta_e_span(session):
+    """`n` conta linhas; `rodadas`/`span_dias` contam TEMPO DE OBSERVAÇÃO. Uma
+    chamada de calendar grava o mês inteiro numa tacada — 30 linhas, 1 rodada,
+    span 0 — e é isso que o warm-up precisa enxergar."""
+    w = _watch(session)
+    snaps = persistir_quotes(session, w, [
+        _quote("3000", dia=1), _quote("3100", dia=2), _quote("3200", dia=3),
+    ])
+
+    base = baseline_rota(session, "GRU", "LIS")
+    assert (base.n, base.rodadas, base.span_dias) == (3, 1, 0)
+
+    snaps[0].coletado_em = utcnow() - timedelta(days=2)
+    session.flush()
+
+    base = baseline_rota(session, "GRU", "LIS")
+    assert (base.n, base.rodadas, base.span_dias) == (3, 2, 2)
+
+
+def test_baseline_comparavel_ignora_so_ida_de_outro_watch(session):
+    """Prova da auditoria: baseline do watch ida-e-volta dava n=5,
+    mínimo=4000,00; bastou UM snapshot só-ida de OUTRO watch para virar n=6,
+    mínimo=2100,00. Só-ida custar ~metade do round-trip é normal, então a
+    mistura fabricava ERROR_FARE falso e silenciava NOVO_MINIMO legítimo."""
+    ida_e_volta = _watch(session)
+    so_ida = _watch(session, nome="GRU -> LIS só ida", ida_volta=False)
+    persistir_quotes(session, ida_e_volta, [
+        _quote(p, dia=i + 1, volta=28)
+        for i, p in enumerate(["4000", "4200", "4400", "4100", "4300"])
+    ])
+    alvo = persistir_quotes(session, ida_e_volta, [_quote("3900", dia=20, volta=28)])[0]
+
+    antes = baseline_comparavel(session, ida_e_volta.id, alvo)
+    persistir_quotes(session, so_ida, [_quote("2100", dia=12)])   # só-ida, outro watch
+    depois = baseline_comparavel(session, ida_e_volta.id, alvo)
+
+    assert (antes.n, antes.minimo) == (5, Decimal("4000"))
+    assert (depois.n, depois.minimo) == (5, Decimal("4000"))
+
+
+def test_baseline_comparavel_segmenta_por_fonte(session):
+    """TP_CACHE (defasado até 48h) e SERPAPI (ao vivo) não são o mesmo
+    patamar de preço; não podem formar um baseline só."""
+    w = _watch(session)
+    persistir_quotes(session, w, [
+        _quote("3000", dia=1),
+        _quote("2000", dia=2, fonte="SERPAPI"),
+    ])
+    alvo = persistir_quotes(session, w, [_quote("2900", dia=20)])[0]   # TP_CACHE
+
+    base = baseline_comparavel(session, w.id, alvo)
+
+    assert (base.n, base.minimo) == (1, Decimal("3000"))
+
+
+def test_baseline_comparavel_segmenta_por_watch(session):
+    """Dois watches na mesma rota podem ter critérios (duração, janela de
+    volta) que produzem patamares diferentes — cada um tem seu histórico."""
+    meu = _watch(session)
+    outro = _watch(session, nome="GRU -> LIS outro")
+    persistir_quotes(session, meu, [_quote("3000", dia=1, volta=28)])
+    persistir_quotes(session, outro, [_quote("1200", dia=2, volta=28)])
+    alvo = persistir_quotes(session, meu, [_quote("2900", dia=20, volta=28)])[0]
+
+    base = baseline_comparavel(session, meu.id, alvo)
+
+    assert (base.n, base.minimo) == (1, Decimal("3000"))
 
 
 def test_executar_varredura_persiste_por_watch(session):

@@ -19,8 +19,12 @@ from __future__ import annotations
 
 import ast
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+
+from voofacil.alerts.mensagem import fmt_brl
 
 PAINEL_PATH = Path(__file__).resolve().parent.parent / "voofacil" / "app" / "Painel.py"
 
@@ -49,20 +53,26 @@ def _constante(nome: str):
     raise AssertionError(f"constante {nome!r} não encontrada em Painel.py")
 
 
-def _carregar_funcao_isolada(nome: str):
+def _carregar_funcao_isolada(nome: str, extra_escopo: dict | None = None):
     """Compila e executa APENAS a função `nome` (extraída da AST do Painel).
 
     Importar Painel.py rodaria `main()`; extrair o nó da função e compilá-lo
     sozinho dá o comportamento real da função sem nenhum efeito colateral. Só
-    serve para funções puras (sem `st.`)."""
+    serve para funções puras (sem `st.`). `extra_escopo` injeta dependências que
+    a função referencia (constantes/helpers do módulo), permitindo isolar até
+    funções puras que dependem de outras (ex.: `_criterios_watch` usa `fmt_brl`,
+    `MESES_PT` e `_fmt_data`)."""
     modulo = ast.Module(body=[_funcao(nome)], type_ignores=[])
     ast.fix_missing_locations(modulo)
     escopo = {
         "datetime": datetime,
         "timedelta": timedelta,
         "timezone": timezone,
+        "date": date,
         "_OFFSET_UTC_PARA_BRT_HORAS": _constante("_OFFSET_UTC_PARA_BRT_HORAS"),
     }
+    if extra_escopo:
+        escopo.update(extra_escopo)
     exec(compile(modulo, str(PAINEL_PATH), "exec"), escopo)  # noqa: S102
     return escopo[nome]
 
@@ -167,3 +177,218 @@ def test_painel_explica_o_modelo_catch_up_na_aba():
     assert "GitHub Actions" in fonte
     assert "não antes de" in fonte, "falta explicar que o horário é um 'não antes de'"
     assert re.search(r"4 a 7", fonte), "falta o número real de execuções por dia"
+
+
+# ==========================================================================
+# D8 — o painel parou de MENTIR: montagem honesta do nome do watch
+# ==========================================================================
+
+def _nome_watch():
+    return _carregar_funcao_isolada("_nome_watch")
+
+
+def test_nome_watch_nao_repete_o_mesmo_dia_e_inclui_a_volta():
+    """O caso REAL do chamado: RIO -> NAP, embarque exato 07/05/2027, volta exata
+    22/05/2027. Antes saía '#2 RIO -> NAP 07/05-07/05/2027' (mesmo dia duas vezes,
+    sem a volta). Agora o nome tem que refletir o que foi configurado."""
+    nome = _nome_watch()(
+        "RIO", "NAP", date(2027, 5, 7), date(2027, 5, 7),
+        somente_ida=False, volta_ini=date(2027, 5, 22), volta_fim=None,
+        tipo_data_ida="EXATA", tipo_data_volta="EXATA",
+    )
+    assert nome == "RIO -> NAP - 07/05/2027 a 22/05/2027 (ida e volta, datas exatas)"
+    # a doença antiga: o mesmo dia impresso duas vezes
+    assert "07/05/2027 a 07/05/2027" not in nome
+    assert "22/05/2027" in nome, "a data de VOLTA precisa entrar no nome"
+
+
+def test_nome_watch_janela_de_ida_intervalo():
+    nome = _nome_watch()(
+        "GRU", "LIS", date(2026, 9, 1), date(2026, 9, 30),
+        somente_ida=False, tipo_data_ida="INTERVALO", tipo_data_volta="INTERVALO",
+    )
+    assert "01/09 a 30/09/2026" in nome
+    assert "(ida e volta)" in nome
+
+
+def test_nome_watch_somente_ida():
+    nome = _nome_watch()(
+        "GRU", "LIS", date(2026, 9, 1), date(2026, 9, 30), somente_ida=True,
+        tipo_data_ida="INTERVALO",
+    )
+    assert "(somente ida)" in nome
+    assert "volta" not in nome
+
+
+def test_nome_watch_trunca_em_80_caracteres():
+    nome = _nome_watch()(
+        "GRU", "10 destinos", date(2026, 9, 1), date(2026, 9, 30),
+        somente_ida=False, tipo_data_ida="INTERVALO",
+    )
+    assert len(nome) <= 80
+
+
+# ==========================================================================
+# D8 — o painel parou de ESCONDER: critérios e selo de saúde
+# ==========================================================================
+
+def _criterios_watch():
+    return _carregar_funcao_isolada("_criterios_watch", {
+        "fmt_brl": fmt_brl,
+        "MESES_PT": _constante("MESES_PT"),
+        "_ROTULO_TIPO_DATA_CURTO": _constante("_ROTULO_TIPO_DATA_CURTO"),
+        "_fmt_data": _carregar_funcao_isolada("_fmt_data"),
+    })
+
+
+def _watch_falso(**kw):
+    base = dict(
+        data_ini=date(2027, 5, 7), data_fim=date(2027, 5, 7),
+        tipo_data_ida="EXATA", tipo_data_volta="EXATA", ida_volta=True,
+        data_volta_ini=date(2027, 5, 22), data_volta_fim=None,
+        duracao_min=None, duracao_max=None, mes_especifico=None,
+        preco_limite=Decimal("3500"), preco_minimo=None,
+        preco_aproximado=Decimal("3000"), flexibilidade_dias=None,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_criterios_watch_mostra_tudo_com_travessao_quando_vazio():
+    itens = dict(_criterios_watch()(_watch_falso()))
+    assert itens["Preço-alvo (aproximado)"] == "R$ 3.000,00"
+    assert itens["Preço máximo (limite)"] == "R$ 3.500,00"
+    assert itens["Preço mínimo (piso)"] == "—"        # não definido => travessão
+    assert itens["Duração da estadia"] == "—"
+    assert itens["Mês específico"] == "—"
+    # a volta (o dado que o painel escondia) aparece
+    assert "22/05/2027" in itens["Janela de desembarque"]
+
+
+def test_criterios_watch_somente_ida_omite_campos_de_volta():
+    itens = dict(_criterios_watch()(_watch_falso(ida_volta=False)))
+    assert itens["Somente ida?"].startswith("sim")
+    assert "Janela de desembarque" not in itens
+    assert "Duração da estadia" not in itens
+
+
+def _selo_saude():
+    return _carregar_funcao_isolada("_selo_saude")
+
+
+def test_selo_saude_verde_quando_coleta_nas_ultimas_24h():
+    nivel, texto = _selo_saude()(5, 20)
+    assert nivel == "verde"
+    assert "24h" in texto
+
+
+def test_selo_saude_amarelo_quando_so_ha_dados_na_semana():
+    nivel, _ = _selo_saude()(0, 3)
+    assert nivel == "amarelo"
+
+
+def test_selo_saude_vermelho_denuncia_coleta_zerada():
+    """O item de maior valor: zero por dias vira o alarme que teria denunciado
+    sozinho a coleta zerada e o agendamento morto."""
+    nivel, texto = _selo_saude()(0, 0)
+    assert nivel == "vermelho"
+    assert "não está coletando nada" in texto
+
+
+# ==========================================================================
+# D13 — validação de entrada: watches não nascem mais mortos em silêncio
+# ==========================================================================
+
+def _validar_criterios():
+    return _carregar_funcao_isolada("_validar_criterios", {"fmt_brl": fmt_brl})
+
+
+def test_validar_criterios_recusa_data_fim_antes_da_ini():
+    erro = _validar_criterios()(
+        data_ini=date(2027, 9, 30), data_fim=date(2027, 9, 1), somente_ida=True,
+    )
+    assert erro and "antes" in erro
+
+
+def test_validar_criterios_recusa_duracao_min_maior_que_max():
+    erro = _validar_criterios()(
+        data_ini=date(2027, 9, 1), data_fim=date(2027, 9, 30), somente_ida=False,
+        duracao_min=20, duracao_max=7,
+    )
+    assert erro and "duração" in erro.lower()
+
+
+def test_validar_criterios_recusa_piso_acima_do_teto():
+    erro = _validar_criterios()(
+        data_ini=date(2027, 9, 1), data_fim=date(2027, 9, 30), somente_ida=True,
+        preco_minimo=Decimal("4000"), preco_limite=Decimal("3500"),
+    )
+    assert erro and "mínimo" in erro.lower()
+
+
+def test_validar_criterios_recusa_destino_que_nao_e_iata():
+    erro = _validar_criterios()(
+        data_ini=date(2027, 9, 1), data_fim=date(2027, 9, 30), somente_ida=True,
+        destinos_custom=["LIS", "MADRI"],   # "Lisboa, MADRI" digitado por nome
+    )
+    assert erro and "IATA" in erro
+
+
+def test_validar_criterios_aceita_configuracao_valida():
+    assert _validar_criterios()(
+        data_ini=date(2027, 5, 7), data_fim=date(2027, 5, 7), somente_ida=False,
+        data_volta_ini=date(2027, 5, 22), data_volta_fim=None,
+        duracao_min=7, duracao_max=14,
+        preco_minimo=Decimal("1500"), preco_limite=Decimal("3500"),
+        destinos_custom=["LIS", "MAD"],
+    ) is None
+
+
+# ==========================================================================
+# D8/D13 — a UI está PLUGADA nesses helpers (não basta existirem soltos)
+# ==========================================================================
+
+def test_aba_watches_usa_selo_de_saude_e_criterios():
+    aba = _funcao("aba_watches")
+    chamadas = {
+        n.func.id for n in ast.walk(aba)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "_selo_saude" in chamadas
+    assert "_contagem_snapshots_recentes" in chamadas
+    assert "_criterios_watch" in chamadas
+    assert "_form_editar_watch" in chamadas
+    assert "Critérios deste monitoramento" in _fonte()
+
+
+def test_aba_watches_valida_e_protege_a_sessao_na_criacao():
+    aba = _funcao("aba_watches")
+    chamadas = {
+        n.func.id for n in ast.walk(aba)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "_validar_criterios" in chamadas, "criação precisa validar antes de gravar (D13)"
+    assert "_nome_watch" in chamadas, "criação precisa montar o nome honesto (D8)"
+    assert "_escrita_protegida" in chamadas, "escrita precisa proteger a Session do painel"
+
+
+def test_form_editar_watch_valida_protege_e_chama_atualizar():
+    edit = _funcao("_form_editar_watch")
+    chamadas = {
+        n.func.id for n in ast.walk(edit)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "_validar_criterios" in chamadas, "edição também precisa validar (D13)"
+    assert "_escrita_protegida" in chamadas
+    atributos = {n.attr for n in ast.walk(edit) if isinstance(n, ast.Attribute)}
+    # atualizar_watch é passado por nome ao wrapper _escrita_protegida
+    assert "atualizar_watch" in {
+        n.id for n in ast.walk(edit) if isinstance(n, ast.Name)
+    }
+
+
+def test_grafico_historico_usa_preco_aproximado():
+    """D7: o preço-alvo deixou de ser decorativo — vira linha no gráfico."""
+    grafico = _funcao("_grafico_historico")
+    atributos = {n.attr for n in ast.walk(grafico) if isinstance(n, ast.Attribute)}
+    assert "preco_aproximado" in atributos

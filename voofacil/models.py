@@ -92,8 +92,30 @@ class Watch(Base):
     ativo: Mapped[bool] = mapped_column(Boolean, default=True)
     criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    snapshots: Mapped[list["PriceSnapshot"]] = relationship(back_populates="watch")
-    alertas: Mapped[list["Alerta"]] = relationship(back_populates="watch")
+    # `cascade="all, delete-orphan"` é OBRIGATÓRIO aqui: sem ele o SQLAlchemy
+    # trata a exclusão de um Watch como "desvincular os filhos", ou seja, tenta
+    # UPDATE price_snapshot SET watch_id = NULL — e watch_id é NOT NULL. Excluir
+    # um monitoramento que já coletou preço estourava
+    # `IntegrityError: null value in column "watch_id" violates not-null
+    # constraint` e, como o painel guarda a MESMA Session em st.session_state,
+    # toda operação seguinte morria com PendingRollbackError até recarregar a
+    # página. Com o cascade no nível do ORM o SQLAlchemy emite os DELETEs dos
+    # filhos explicitamente — sem exigir ALTER de constraint (ON DELETE CASCADE)
+    # no Postgres de produção.
+    #
+    # A ordem dos DELETEs fica a cargo do unit of work, que respeita a dependência
+    # entre tabelas: `alerta` referencia `price_snapshot`, logo os alertas são
+    # apagados ANTES dos snapshots. (Ver também
+    # `voofacil.engine.queries.excluir_watch`, que faz a mesma limpeza em massa,
+    # sem carregar as coleções, para watches com dezenas de milhares de linhas.)
+    snapshots: Mapped[list["PriceSnapshot"]] = relationship(
+        back_populates="watch",
+        cascade="all, delete-orphan",
+    )
+    alertas: Mapped[list["Alerta"]] = relationship(
+        back_populates="watch",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         CheckConstraint("tipo IN ('ROTA','REGIAO')", name="ck_watch_tipo"),

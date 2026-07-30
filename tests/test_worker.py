@@ -6,8 +6,13 @@ from decimal import Decimal
 
 from voofacil.engine.orcamento import registrar_chamada
 from voofacil.models import PriceSnapshot, TipoWatch, Watch
-from voofacil.schemas import PriceQuote
-from voofacil.worker import _providers_padrao, executar_varredura
+from voofacil.schemas import Candidato, PriceQuote
+from voofacil.worker import (
+    TETO_CANDIDATOS_POR_WATCH,
+    _providers_padrao,
+    deduplicar_candidatos,
+    executar_varredura,
+)
 
 
 def _watch(session, **kw):
@@ -178,3 +183,92 @@ def test_executar_varredura_usa_duas_fontes_quando_serpapi_esta_na_lista(session
     assert fake_serpapi.chamadas == 1
     fontes = {s.fonte for s in session.query(PriceSnapshot).filter_by(watch_id=w.id)}
     assert fontes == {"TP_CACHE", "SERPAPI"}
+
+
+# ---------- deduplicação e teto de candidatos por varredura ----------
+
+
+def _cand(preco="3000", destino="LIS", dia=10, volta=None, fonte="TP_CACHE",
+          watch_id=1, snapshot_id=1, gatilho="LIMITE") -> Candidato:
+    return Candidato(
+        quote=_quote(
+            destino=destino,
+            data_ida=date(2026, 9, dia),
+            data_volta=date(2026, 9, volta) if volta else None,
+            preco=Decimal(preco),
+            fonte=fonte,
+        ),
+        watch_id=watch_id,
+        snapshot_id=snapshot_id,
+        gatilho=gatilho,
+    )
+
+
+def test_deduplicar_colapsa_mesma_viagem_mantendo_a_mais_barata():
+    """Sweep multi-fonte vê a MESMA rota/dia por TP_CACHE e por SERPAPI na
+    mesma rodada — é um candidato só, o mais barato."""
+    resultado = deduplicar_candidatos([
+        _cand(preco="3000", fonte="TP_CACHE", snapshot_id=1),
+        _cand(preco="2800", fonte="SERPAPI", snapshot_id=2),
+    ])
+
+    assert len(resultado) == 1
+    assert resultado[0].quote.preco == Decimal("2800")
+    assert resultado[0].snapshot_id == 2
+
+
+def test_deduplicar_nao_junta_datas_de_volta_diferentes():
+    resultado = deduplicar_candidatos([
+        _cand(preco="3000", dia=10, volta=17, snapshot_id=1),
+        _cand(preco="3100", dia=10, volta=24, snapshot_id=2),
+    ])
+
+    assert len(resultado) == 2
+
+
+def test_deduplicar_aplica_teto_por_watch_mantendo_os_mais_baratos():
+    candidatos = [
+        _cand(preco=str(3000 + 10 * i), dia=i + 1, snapshot_id=i + 1)
+        for i in range(10)
+    ]
+
+    resultado = deduplicar_candidatos(candidatos, teto_por_watch=3)
+
+    assert [c.quote.preco for c in resultado] == [
+        Decimal("3000"), Decimal("3010"), Decimal("3020"),
+    ]
+
+
+def test_deduplicar_conta_o_teto_por_watch_e_nao_globalmente():
+    candidatos = (
+        [_cand(preco=str(3000 + i), dia=i + 1, watch_id=1, snapshot_id=i + 1)
+         for i in range(4)]
+        + [_cand(preco=str(4000 + i), dia=i + 1, watch_id=2, snapshot_id=10 + i)
+           for i in range(4)]
+    )
+
+    resultado = deduplicar_candidatos(candidatos, teto_por_watch=2)
+
+    assert [c.watch_id for c in resultado] == [1, 1, 2, 2]
+
+
+def test_varredura_de_um_mes_nao_gera_dez_candidatos(session):
+    """Cenário exato da auditoria: watch com limite 3500 e 1 mês de calendar
+    (30 cotações), banco vazio antes => 10 candidatos LIMITE numa ÚNICA
+    varredura. Isso seriam 10 chamadas SerpApi (teto diário = 8) e 10
+    mensagens POR CANAL."""
+    w = _watch(session, preco_limite=Decimal("3500"))
+    provider = FakeProvider([
+        _quote(data_ida=date(2026, 9, i + 1), preco=Decimal(3000 + 55 * i))
+        for i in range(30)
+    ])   # 10 cotações <= 3500 (3000, 3055, ..., 3495)
+
+    resultado = executar_varredura(session, providers=[provider])
+    session.commit()
+
+    assert session.query(PriceSnapshot).count() == 30
+    assert resultado.snapshots_por_watch == {w.id: 30}
+    assert len(resultado.candidatos) == TETO_CANDIDATOS_POR_WATCH
+    assert [c.quote.preco for c in resultado.candidatos] == [
+        Decimal("3000"), Decimal("3055"), Decimal("3110"),
+    ]

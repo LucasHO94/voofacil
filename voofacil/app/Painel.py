@@ -24,6 +24,7 @@ carregar_segredos_streamlit()
 
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
 
 from voofacil.alerts.dispatcher import canais_padrao, despachar  # noqa: E402
 from voofacil.alerts.mensagem import fmt_brl
@@ -34,12 +35,14 @@ from voofacil.engine.queries import (
     alertas_do_watch,
     alertas_recentes,
     alternar_ativo,
+    atualizar_watch,
     criar_watch_regiao,
     criar_watch_rota,
     excluir_watch,
     historico_precos,
     listar_watches,
 )
+from voofacil.models import PriceSnapshot, utcnow
 # NOTA: módulo criado por outro agente em paralelo (contrato combinado
 # previamente) — pode não existir ainda neste ambiente enquanto os dois
 # trabalham ao mesmo tempo; a integração final é verificada depois.
@@ -88,6 +91,13 @@ def _grafico_historico(session, watch) -> go.Figure:
     if watch.preco_limite:
         fig.add_hline(y=float(watch.preco_limite), line_dash="dash", line_color="red",
                        annotation_text=f"seu limite {fmt_brl(watch.preco_limite)}")
+    # D7: o preço-alvo (aproximado) configurado pelo usuário deixou de ser
+    # decorativo — vira uma linha de referência no gráfico, igual ao limite e ao
+    # mínimo histórico. Assim o alvo que a pessoa digitou realmente aparece.
+    if watch.preco_aproximado:
+        fig.add_hline(y=float(watch.preco_aproximado), line_dash="dashdot",
+                       line_color="royalblue",
+                       annotation_text=f"seu preço-alvo {fmt_brl(watch.preco_aproximado)}")
 
     for alerta in alertas_do_watch(session, watch.id):
         fig.add_vline(x=alerta.enviado_em, line_color="orange", opacity=0.3)
@@ -158,27 +168,494 @@ def _buscador_local(rotulo: str, key: str) -> str | None:
     return codigo_final
 
 
+# ==========================================================================
+# Helpers PUROS (sem `st.`) — extraídos para poderem ser testados de verdade,
+# não só por AST. Cobrem a montagem do nome (D8), a validação de entrada (D13)
+# e o selo de saúde (D8). Ver tests/test_painel_agendamento.py.
+# ==========================================================================
+
+_ROTULO_TIPO_DATA_CURTO = {
+    "INTERVALO": "Intervalo (qualquer data da janela)",
+    "APROXIMADA": "Aproximada (com tolerância)",
+    "EXATA": "Exata",
+}
+
+
+def _fmt_data(d) -> str:
+    """Data em dd/mm/aaaa, ou travessão explícito quando não definida."""
+    return f"{d:%d/%m/%Y}" if d else "—"
+
+
+def _nome_watch(
+    origem: str, destino_txt: str, ida_ini, ida_fim,
+    *,
+    somente_ida: bool,
+    volta_ini=None,
+    volta_fim=None,
+    tipo_data_ida: str = "INTERVALO",
+    tipo_data_volta: str = "INTERVALO",
+) -> str:
+    """Monta o nome do watch a partir do que foi REALMENTE configurado (D8).
+
+    O nome antigo saía de origem/destino + janela de ida apenas; quando a ida era
+    EXATA a janela colapsava (ini == fim) e o mesmo dia aparecia duas vezes, e a
+    data de VOLTA nunca entrava — foi exatamente o "#2 RIO -> NAP 07/05-07/05/2027"
+    que o usuário abriu chamado. Agora:
+
+    - ida com data única (EXATA/APROXIMADA ou janela de 1 dia) imprime a data uma
+      vez só; se houver volta única, vira "<ida> a <volta>";
+    - ida em janela imprime "<ini> a <fim>" e a volta entra como "volta ...";
+    - o rótulo final descreve ida/volta e a natureza das datas (exatas/aproximada).
+
+    Ex.: "RIO -> NAP - 07/05/2027 a 22/05/2027 (ida e volta, datas exatas)".
+    Trunca em 80 caracteres (a coluna `Watch.nome` é String(80)).
+    """
+    ida_unica = ida_ini == ida_fim
+    if ida_unica:
+        datas_txt = f"{ida_ini:%d/%m/%Y}"
+    else:
+        datas_txt = f"{ida_ini:%d/%m} a {ida_fim:%d/%m/%Y}"
+
+    if not somente_ida:
+        if volta_ini and volta_fim and volta_ini != volta_fim:
+            # janela própria de desembarque
+            datas_txt += f", volta {volta_ini:%d/%m} a {volta_fim:%d/%m/%Y}"
+        elif volta_ini:
+            if ida_unica:
+                datas_txt = f"{ida_ini:%d/%m/%Y} a {volta_ini:%d/%m/%Y}"
+            else:
+                datas_txt += f", volta {volta_ini:%d/%m/%Y}"
+
+    descritores = ["somente ida"] if somente_ida else ["ida e volta"]
+    exatas = tipo_data_ida == "EXATA" and (somente_ida or tipo_data_volta == "EXATA")
+    if exatas:
+        descritores.append("datas exatas")
+    else:
+        if tipo_data_ida == "EXATA":
+            descritores.append("ida exata")
+        elif tipo_data_ida == "APROXIMADA":
+            descritores.append("ida aproximada")
+        if not somente_ida:
+            if tipo_data_volta == "EXATA":
+                descritores.append("volta exata")
+            elif tipo_data_volta == "APROXIMADA":
+                descritores.append("volta aproximada")
+
+    nome = f"{origem} -> {destino_txt} - {datas_txt} ({', '.join(descritores)})"
+    return nome[:80]
+
+
+def _texto_destino(tipo: str, destino_iata, destinos) -> str:
+    """Rótulo curto de destino para o nome do watch (não estoura os 80 chars)."""
+    if tipo == "ROTA":
+        return (destino_iata or "?").upper()
+    lista = [d.upper() for d in (destinos or [])]
+    if len(lista) <= 3:
+        return "/".join(lista) if lista else "?"
+    return f"{len(lista)} destinos"
+
+
+def _criterios_watch(watch) -> list[tuple[str, str]]:
+    """Lista (rótulo, valor) de CADA critério configurável do watch (D8).
+
+    Um valor não definido vira travessão explícito ("—") — o painel escondia
+    quase tudo o que o usuário configurava; aqui nada fica implícito.
+    """
+    if watch.duracao_min and watch.duracao_max:
+        if watch.duracao_min == watch.duracao_max:
+            dur = f"{watch.duracao_min} noites (exata)"
+        else:
+            dur = f"{watch.duracao_min} a {watch.duracao_max} noites"
+    elif watch.duracao_min:
+        dur = f"a partir de {watch.duracao_min} noites"
+    elif watch.duracao_max:
+        dur = f"até {watch.duracao_max} noites"
+    else:
+        dur = "—"
+
+    if watch.data_volta_ini and watch.data_volta_fim and watch.data_volta_ini != watch.data_volta_fim:
+        janela_volta = f"{_fmt_data(watch.data_volta_ini)} a {_fmt_data(watch.data_volta_fim)}"
+    elif watch.data_volta_ini:
+        janela_volta = _fmt_data(watch.data_volta_ini)
+    else:
+        janela_volta = "—"
+
+    if watch.data_ini and watch.data_fim and watch.data_ini != watch.data_fim:
+        embarque = f"{_fmt_data(watch.data_ini)} a {_fmt_data(watch.data_fim)}"
+    else:
+        embarque = _fmt_data(watch.data_ini)
+
+    mes = MESES_PT[watch.mes_especifico] if watch.mes_especifico else "—"
+
+    itens = [
+        ("Embarque (janela)", embarque),
+        ("Tipo da data de embarque",
+         _ROTULO_TIPO_DATA_CURTO.get(watch.tipo_data_ida, watch.tipo_data_ida)),
+        ("Somente ida?", "não — ida e volta" if watch.ida_volta else "sim (sem volta)"),
+    ]
+    if watch.ida_volta:
+        itens.append(("Tipo da data de desembarque",
+                      _ROTULO_TIPO_DATA_CURTO.get(watch.tipo_data_volta, watch.tipo_data_volta)))
+        itens.append(("Janela de desembarque", janela_volta))
+        itens.append(("Duração da estadia", dur))
+    itens.extend([
+        ("Mês específico", mes),
+        ("Preço máximo (limite)", fmt_brl(watch.preco_limite) if watch.preco_limite else "—"),
+        ("Preço mínimo (piso)", fmt_brl(watch.preco_minimo) if watch.preco_minimo else "—"),
+        ("Preço-alvo (aproximado)",
+         fmt_brl(watch.preco_aproximado) if watch.preco_aproximado else "—"),
+        ("Flexibilidade (dias)",
+         str(watch.flexibilidade_dias) if watch.flexibilidade_dias is not None else "—"),
+    ])
+    return itens
+
+
+def _selo_saude(n_24h: int, n_7d: int) -> tuple[str, str]:
+    """Traduz a contagem de snapshots recentes num selo (nível, texto) (D8).
+
+    É o item de maior valor da aba: com a coleta zerada e o agendamento morto,
+    é este selo que denuncia sozinho que o monitoramento não coleta nada há dias.
+    """
+    if n_24h > 0:
+        return ("verde", f"🟢 coletando — {n_24h} nas últimas 24h · {n_7d} em 7 dias")
+    if n_7d > 0:
+        return ("amarelo",
+                f"🟡 nada nas últimas 24h (mas {n_7d} nos últimos 7 dias) — pode estar atrasando")
+    return ("vermelho", "🔴 este monitoramento não está coletando nada (0 snapshots em 7 dias)")
+
+
+def _validar_criterios(
+    *,
+    data_ini,
+    data_fim,
+    somente_ida: bool,
+    data_volta_ini=None,
+    data_volta_fim=None,
+    duracao_min=None,
+    duracao_max=None,
+    preco_minimo=None,
+    preco_limite=None,
+    destinos_custom=None,
+) -> str | None:
+    """Valida os critérios ANTES de gravar (D13); devolve a RAZÃO ou None se ok.
+
+    Sem isto o painel aceitava, com "Monitoramento criado!", watches que nunca
+    produzem nada: data final antes da inicial, duração mínima maior que a máxima,
+    piso de preço acima do teto, e destinos digitados por nome (não IATA).
+    """
+    if data_ini and data_fim and data_ini > data_fim:
+        return (f"A data final de embarque ({data_fim:%d/%m/%Y}) está antes da inicial "
+                f"({data_ini:%d/%m/%Y}) — nenhuma data cabe nessa janela, o "
+                "monitoramento nunca cotaria nada.")
+    if (not somente_ida and data_volta_ini and data_volta_fim
+            and data_volta_ini > data_volta_fim):
+        return (f"A data final de desembarque ({data_volta_fim:%d/%m/%Y}) está antes da "
+                f"inicial ({data_volta_ini:%d/%m/%Y}) — janela de volta impossível.")
+    if duracao_min is not None and duracao_max is not None and duracao_min > duracao_max:
+        return (f"A duração mínima ({duracao_min} noites) é maior que a máxima "
+                f"({duracao_max} noites) — nenhuma estadia caberia.")
+    if preco_minimo is not None and preco_limite is not None and preco_minimo > preco_limite:
+        return (f"O preço mínimo ({fmt_brl(preco_minimo)}) é maior que o limite máximo "
+                f"({fmt_brl(preco_limite)}) — nenhum preço poderia disparar alerta.")
+    for d in destinos_custom or []:
+        if len(d) != 3 or not d.isalpha():
+            return (f"Destino inválido: {d!r}. Use códigos IATA de 3 letras (ex.: LIS, "
+                    "MAD, CDG). Nomes de cidade não são aceitos no campo multidestino.")
+    return None
+
+
+class _FalhaEscrita:
+    """Sentinela de `_escrita_protegida`: a mutação falhou e virou st.error."""
+
+
+FALHA_ESCRITA = _FalhaEscrita()
+
+
+def _escrita_protegida(descricao: str, funcao, session, *args, **kwargs):
+    """Executa uma mutação sem nunca deixar a Session do painel envenenada.
+
+    O painel guarda a MESMA Session em st.session_state; uma exceção não tratada
+    numa escrita quebraria TODAS as operações seguintes com PendingRollbackError
+    até recarregar a página. Aqui qualquer falha vira rollback defensivo +
+    st.error com a razão, devolvendo `FALHA_ESCRITA` para o chamador decidir se
+    faz `st.rerun()`. As funções de `queries.py` já fazem rollback interno; este
+    wrapper é a segunda rede (e a que converte a exceção em mensagem na tela).
+    """
+    try:
+        return funcao(session, *args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - proteger a sessão exige capturar tudo
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        st.error(f"Não foi possível {descricao}: {exc}")
+        return FALHA_ESCRITA
+
+
+def _contagem_snapshots_recentes(session, watch_id: int) -> tuple[int, int]:
+    """(snapshots nas últimas 24h, nas últimas 24h*7) — base do selo de saúde.
+
+    Query enxuta (COUNT no banco, não traz linha nenhuma para o Python). NÃO
+    reaproveita `historico_precos`, que cai de volta para dados antigos quando a
+    janela recente está vazia — justamente o caso que o selo precisa flagrar.
+    """
+    agora = utcnow()
+
+    def _contar(desde) -> int:
+        return int(session.scalar(
+            select(func.count(PriceSnapshot.id)).where(
+                PriceSnapshot.watch_id == watch_id,
+                PriceSnapshot.coletado_em >= desde,
+            )
+        ) or 0)
+
+    return _contar(agora - timedelta(hours=24)), _contar(agora - timedelta(days=7))
+
+
+def _form_editar_watch(session, w) -> None:
+    """Formulário de edição de um watch, pré-preenchido com os valores atuais (D8).
+
+    Diferente do form de criação (que revela campos conforme seletores FORA do
+    form), aqui TODOS os campos aparecem de uma vez, já carregados — um st.form
+    não rerroda a cada widget, então mostrar tudo é o caminho previsível. A
+    interpretação (colapsar datas EXATA/APROXIMADA, ligar/desligar volta) acontece
+    no submit, com a MESMA validação da criação (D13) antes de gravar.
+    """
+    st.markdown(f"#### ✏️ Editando **#{w.id} {w.nome}**")
+    eh_rota = w.tipo == "ROTA"
+
+    with st.form(f"editar_watch_{w.id}"):
+        origem = st.text_input(
+            "Origem (IATA)", value=w.origem_iata or "", key=f"edit_origem_{w.id}",
+        ).strip().upper()
+        destino_str = destinos_str = ""
+        if eh_rota:
+            destino_str = st.text_input(
+                "Destino (IATA)", value=w.destino_iata or "", key=f"edit_destino_{w.id}",
+            ).strip().upper()
+        else:
+            destinos_str = st.text_area(
+                "Destinos (IATA separados por vírgula)",
+                value=", ".join(w.destinos), key=f"edit_destinos_{w.id}",
+            )
+
+        c1, c2 = st.columns(2)
+        data_ini = c1.date_input(
+            "Embarque — início (ou data-alvo, se exata/aproximada)",
+            value=w.data_ini, key=f"edit_data_ini_{w.id}",
+        )
+        data_fim = c2.date_input("Embarque — fim", value=w.data_fim, key=f"edit_data_fim_{w.id}")
+        tipo_data_ida = st.selectbox(
+            "Tipo de data de embarque", TIPOS_DATA,
+            index=TIPOS_DATA.index(w.tipo_data_ida) if w.tipo_data_ida in TIPOS_DATA else 0,
+            format_func=lambda t: _ROTULOS_TIPO_DATA_IDA[t], key=f"edit_tdi_{w.id}",
+        )
+
+        ida_volta = st.checkbox("Ida e volta", value=w.ida_volta, key=f"edit_iv_{w.id}")
+        st.caption("Campos de volta abaixo só valem quando 'Ida e volta' está marcado.")
+        tipo_data_volta = st.selectbox(
+            "Tipo de data de desembarque", TIPOS_DATA,
+            index=TIPOS_DATA.index(w.tipo_data_volta) if w.tipo_data_volta in TIPOS_DATA else 0,
+            format_func=lambda t: _ROTULOS_TIPO_DATA_VOLTA[t], key=f"edit_tdv_{w.id}",
+        )
+        usar_janela_volta = st.checkbox(
+            "Definir janela própria de desembarque (só p/ tipo Intervalo)",
+            value=w.data_volta_ini is not None, key=f"edit_ujv_{w.id}",
+        )
+        cv1, cv2 = st.columns(2)
+        data_volta_ini = cv1.date_input(
+            "Desembarque — início (ou data-alvo)",
+            value=w.data_volta_ini or (date.today() + timedelta(days=37)),
+            key=f"edit_dvi_{w.id}",
+        )
+        data_volta_fim = cv2.date_input(
+            "Desembarque — fim",
+            value=w.data_volta_fim or (date.today() + timedelta(days=97)),
+            key=f"edit_dvf_{w.id}",
+        )
+
+        cd1, cd2 = st.columns(2)
+        dur_min = int(cd1.number_input(
+            "Duração mínima (noites, 0 = sem restrição)", min_value=0, max_value=180,
+            value=int(w.duracao_min or 0), step=1, key=f"edit_dmin_{w.id}",
+        ))
+        dur_max = int(cd2.number_input(
+            "Duração máxima (noites, 0 = sem restrição)", min_value=0, max_value=180,
+            value=int(w.duracao_max or 0), step=1, key=f"edit_dmax_{w.id}",
+        ))
+
+        mes_nome = st.selectbox(
+            "Mês específico", MESES_PT, index=w.mes_especifico or 0, key=f"edit_mes_{w.id}",
+        )
+        flex = int(st.number_input(
+            "Flexibilidade (dias, para datas aproximadas)", min_value=0, max_value=60,
+            value=int(w.flexibilidade_dias or 0), step=1, key=f"edit_flex_{w.id}",
+        ))
+
+        cp1, cp2, cp3 = st.columns(3)
+        limite_str = cp1.text_input(
+            "Preço máximo (R$)", value=str(w.preco_limite) if w.preco_limite else "",
+            key=f"edit_lim_{w.id}",
+        )
+        minimo_str = cp2.text_input(
+            "Preço mínimo (R$)", value=str(w.preco_minimo) if w.preco_minimo else "",
+            key=f"edit_min_{w.id}",
+        )
+        aprox_str = cp3.text_input(
+            "Preço-alvo aproximado (R$)",
+            value=str(w.preco_aproximado) if w.preco_aproximado else "", key=f"edit_apx_{w.id}",
+        )
+
+        bsalvar, bcancelar = st.columns(2)
+        salvar = bsalvar.form_submit_button("Salvar alterações", type="primary")
+        cancelar = bcancelar.form_submit_button("Cancelar")
+
+    if cancelar:
+        st.session_state.watch_editando = None
+        st.rerun()
+    if not salvar:
+        return
+
+    # --- interpretação + validação (mesma disciplina da criação) ---
+    try:
+        limite = Decimal(limite_str) if limite_str.strip() else None
+        preco_minimo = Decimal(minimo_str) if minimo_str.strip() else None
+        preco_aproximado = Decimal(aprox_str) if aprox_str.strip() else None
+    except InvalidOperation:
+        st.error("Preço inválido — use números (ex.: 3500.00).")
+        return
+    if not origem or len(origem) != 3:
+        st.error("Informe a origem em código IATA (3 letras).")
+        return
+
+    if tipo_data_ida in ("EXATA", "APROXIMADA"):
+        ini_final = fim_final = data_ini
+    else:
+        ini_final, fim_final = data_ini, data_fim
+
+    somente_ida = not ida_volta
+    if somente_ida:
+        volta_ini = volta_fim = None
+    elif tipo_data_volta in ("EXATA", "APROXIMADA"):
+        volta_ini, volta_fim = data_volta_ini, None
+    elif usar_janela_volta:
+        volta_ini, volta_fim = data_volta_ini, data_volta_fim
+    else:
+        volta_ini = volta_fim = None
+
+    duracao_min = dur_min or None
+    duracao_max = dur_max or None
+    mes_especifico = MESES_PT.index(mes_nome) if mes_nome != "Nenhum" else None
+    flexibilidade_dias = flex or None
+
+    destinos_custom = None
+    destino_iata = None
+    if eh_rota:
+        destino_iata = destino_str
+        if not destino_iata or len(destino_iata) != 3:
+            st.error("Informe o destino em código IATA (3 letras).")
+            return
+    else:
+        destinos_custom = [d.strip().upper() for d in destinos_str.split(",") if d.strip()]
+        if not destinos_custom:
+            st.error("Informe ao menos um destino IATA (separado por vírgula).")
+            return
+
+    erro = _validar_criterios(
+        data_ini=ini_final, data_fim=fim_final, somente_ida=somente_ida,
+        data_volta_ini=volta_ini, data_volta_fim=volta_fim,
+        duracao_min=duracao_min, duracao_max=duracao_max,
+        preco_minimo=preco_minimo, preco_limite=limite,
+        destinos_custom=destinos_custom,
+    )
+    if erro:
+        st.error(erro)
+        return
+
+    destino_nome = destino_iata if eh_rota else _texto_destino("REGIAO", None, destinos_custom)
+    tdv = tipo_data_volta if not somente_ida else "INTERVALO"
+    nome = _nome_watch(
+        origem, destino_nome, ini_final, fim_final, somente_ida=somente_ida,
+        volta_ini=volta_ini, volta_fim=volta_fim,
+        tipo_data_ida=tipo_data_ida, tipo_data_volta=tdv,
+    )
+    campos_destino = {"destino": destino_iata} if eh_rota else {"destinos": destinos_custom}
+
+    resultado = _escrita_protegida(
+        "salvar as alterações", atualizar_watch, session, w.id,
+        nome=nome, origem=origem, **campos_destino,
+        data_ini=ini_final, data_fim=fim_final,
+        preco_limite=limite, preco_minimo=preco_minimo, preco_aproximado=preco_aproximado,
+        ida_volta=ida_volta, duracao_min=duracao_min, duracao_max=duracao_max,
+        tipo_data_ida=tipo_data_ida, tipo_data_volta=tdv,
+        flexibilidade_dias=flexibilidade_dias,
+        data_volta_ini=volta_ini, data_volta_fim=volta_fim,
+        mes_especifico=mes_especifico,
+    )
+    if resultado is FALHA_ESCRITA:
+        return
+    st.session_state.watch_editando = None
+    if resultado is None:
+        st.error("Monitoramento não encontrado (pode ter sido excluído em outra aba).")
+    else:
+        st.success(f"Monitoramento atualizado: {nome}")
+    st.rerun()
+
+
 def aba_watches(session):
     st.subheader("Meus monitoramentos")
 
     watches = listar_watches(session)
     if not watches:
         st.info("Nenhum watch cadastrado ainda — crie um abaixo.")
+    editando_id = st.session_state.get("watch_editando")
     for w in watches:
-        col1, col2, col3, col4 = st.columns([5, 2, 1, 1])
+        # Enquanto este watch está em edição, a linha vira o formulário de edição.
+        if editando_id == w.id:
+            _form_editar_watch(session, w)
+            st.divider()
+            continue
+
+        col1, col2, col3, col4, col5 = st.columns([5, 2, 1, 1, 1])
         destino_txt = w.destino_iata if w.tipo == "ROTA" else f"{len(w.destinos)} destino(s)"
         col1.markdown(f"**#{w.id} {w.nome}** — {w.origem_iata} → {destino_txt}"
                        + (" 🔴 inativo" if not w.ativo else ""))
         limite_txt = fmt_brl(w.preco_limite) if w.preco_limite else "—"
         col2.markdown(f"Limite: {limite_txt}")
-        if col3.button("⏸️" if w.ativo else "▶️", key=f"toggle_{w.id}"):
-            alternar_ativo(session, w.id)
+        if col3.button("✏️", key=f"editar_{w.id}", help="Editar critérios"):
+            st.session_state.watch_editando = w.id
             st.rerun()
-        if col4.button("🗑️", key=f"del_{w.id}"):
-            excluir_watch(session, w.id)
-            st.rerun()
+        if col4.button("⏸️" if w.ativo else "▶️", key=f"toggle_{w.id}",
+                       help="Pausar/retomar"):
+            if _escrita_protegida("pausar/retomar o monitoramento",
+                                  alternar_ativo, session, w.id) is not FALHA_ESCRITA:
+                st.rerun()
+        if col5.button("🗑️", key=f"del_{w.id}", help="Excluir"):
+            if _escrita_protegida("excluir o monitoramento",
+                                  excluir_watch, session, w.id) is not FALHA_ESCRITA:
+                st.rerun()
 
-    st.divider()
+        # SELO DE SAÚDE (D8): é o que denuncia sozinho coleta zerada/agendamento
+        # morto. Watch pausado não coleta de propósito, então nem entra no selo.
+        if not w.ativo:
+            st.caption("⏸️ pausado — não coleta enquanto estiver inativo")
+        else:
+            n_24h, n_7d = _contagem_snapshots_recentes(session, w.id)
+            nivel, texto = _selo_saude(n_24h, n_7d)
+            if nivel == "vermelho":
+                st.error(texto)
+            elif nivel == "amarelo":
+                st.warning(texto)
+            else:
+                st.caption(texto)
+
+        # CRITÉRIOS (D8): cada critério configurável, com travessão quando vazio.
+        with st.expander("Critérios deste monitoramento"):
+            for rotulo, valor in _criterios_watch(w):
+                st.markdown(f"- **{rotulo}:** {valor}")
+
+        st.divider()
+
     st.subheader("Novo monitoramento")
     tipo = st.radio(
         "Tipo",
@@ -356,6 +833,34 @@ def aba_watches(session):
             else:
                 ini_final, fim_final = data_ini, data_fim
 
+            # Destinos: resolvidos ANTES de validar, para checar os IATAs do
+            # multidestino (D13) sem gravar nome-de-cidade como se fosse código.
+            destino_iata = destino.upper() if destino else None
+            destinos_custom = None
+            if tipo == "Rota específica":
+                if not destino_iata or len(destino_iata) != 3:
+                    st.error("Informe o destino em código IATA (3 letras).")
+                    return
+            elif tipo == "Multidestino personalizado":
+                destinos_custom = [d.strip().upper() for d in multidestino_str.split(",") if d.strip()]
+                if not destinos_custom:
+                    st.error("Informe ao menos um destino IATA (separado por vírgula).")
+                    return
+
+            # D13: recusa antes de gravar, com a RAZÃO. Sem isto o painel criava
+            # watches que nunca cotam nada (janela invertida, duração impossível,
+            # piso acima do teto, destino que não é IATA) dizendo "criado!".
+            erro = _validar_criterios(
+                data_ini=ini_final, data_fim=fim_final, somente_ida=somente_ida,
+                data_volta_ini=data_volta_ini_form, data_volta_fim=data_volta_fim_form,
+                duracao_min=duracao_min, duracao_max=duracao_max,
+                preco_minimo=preco_minimo, preco_limite=limite,
+                destinos_custom=destinos_custom,
+            )
+            if erro:
+                st.error(erro)
+                return
+
             kwargs_avancados = dict(
                 ida_volta=not somente_ida,
                 duracao_min=duracao_min,
@@ -369,35 +874,40 @@ def aba_watches(session):
                 preco_minimo=preco_minimo,
                 preco_aproximado=preco_aproximado,
             )
+            nome_comum = dict(
+                somente_ida=somente_ida,
+                volta_ini=data_volta_ini_form if not somente_ida else None,
+                volta_fim=data_volta_fim_form if not somente_ida else None,
+                tipo_data_ida=tipo_data_ida,
+                tipo_data_volta=tipo_data_volta if not somente_ida else "INTERVALO",
+            )
 
             if tipo == "Rota específica":
-                if not destino or len(destino) != 3:
-                    st.error("Informe o destino em código IATA (3 letras).")
-                    return
-                criar_watch_rota(
-                    session, f"{origem} -> {destino} {ini_final:%d/%m}-{fim_final:%d/%m/%Y}",
-                    origem, destino, ini_final, fim_final, limite,
+                nome = _nome_watch(origem, destino_iata, ini_final, fim_final, **nome_comum)
+                resultado = _escrita_protegida(
+                    "criar o monitoramento", criar_watch_rota, session, nome,
+                    origem, destino_iata, ini_final, fim_final, limite,
                     **kwargs_avancados,
                 )
             elif tipo == "Região/país (busca ampla)":
-                criar_watch_regiao(
-                    session, f"{origem} -> {regiao} {ini_final:%d/%m}-{fim_final:%d/%m/%Y}",
+                nome = _nome_watch(origem, regiao, ini_final, fim_final, **nome_comum)
+                resultado = _escrita_protegida(
+                    "criar o monitoramento", criar_watch_regiao, session, nome,
                     origem, REGIOES[regiao], ini_final, fim_final, limite,
                     arrival_area_id=ARRIVAL_AREA_ID.get(regiao),
                     **kwargs_avancados,
                 )
             else:
-                destinos_custom = [d.strip().upper() for d in multidestino_str.split(",") if d.strip()]
-                if not destinos_custom:
-                    st.error("Informe ao menos um destino IATA (separado por vírgula).")
-                    return
-                criar_watch_regiao(
-                    session,
-                    f"{origem} -> {'/'.join(destinos_custom)} {ini_final:%d/%m}-{fim_final:%d/%m/%Y}",
+                destino_nome = _texto_destino("REGIAO", None, destinos_custom)
+                nome = _nome_watch(origem, destino_nome, ini_final, fim_final, **nome_comum)
+                resultado = _escrita_protegida(
+                    "criar o monitoramento", criar_watch_regiao, session, nome,
                     origem, destinos_custom, ini_final, fim_final, limite,
                     **kwargs_avancados,
                 )
-            st.success("Monitoramento criado!")
+            if resultado is FALHA_ESCRITA:
+                return
+            st.success(f"Monitoramento criado: {nome}")
             # Os buscadores de Origem/Destino ficam FORA do st.form (ver
             # _buscador_local), então clear_on_submit não os alcança — limpa
             # na mão para não reusar sem querer a mesma origem/destino no

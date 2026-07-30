@@ -37,14 +37,19 @@ def _bate_janela_data(
 ) -> bool:
     """Confere uma data da cotação contra uma janela exata|aproximada|intervalo.
 
-    ini=None significa "sem janela definida" -> não filtra (True).
+    ini=None E fim=None significa "sem janela definida" -> não filtra (True).
+    Se só `fim` foi preenchido, a janela é aberta à esquerda e `fim` vale como
+    teto (antes esse caso caía no `return True` e não filtrava nada — um watch
+    com "voltar até 28/09" aceitava uma volta em dezembro).
     tipo=None (Watch construído sem passar pelo default do ORM) cai no
     comportamento de INTERVALO, que é o default do contrato.
     """
-    if ini is None:
+    if ini is None and fim is None:
         return True
     if data_quote is None:
         return False
+    if ini is None:
+        return data_quote <= fim
 
     if tipo == TipoData.EXATA.value:
         return data_quote == ini
