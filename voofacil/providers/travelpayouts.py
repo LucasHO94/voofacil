@@ -386,7 +386,22 @@ class TravelpayoutsProvider:
         O recorte por janela de embarque continua sendo feito aqui, mas como
         PRÉ-filtro largo (ver _janela_ida_efetiva) — quem decide de verdade é
         `atende_criterios` na engine.
+
+        Watch OPEN-JAW é pulado: o endpoint /v1/prices/calendar cota
+        origem<->destino e não tem nenhum parâmetro para "a volta parte de
+        outra cidade". Cotar o redondo mesmo assim geraria snapshots de um
+        itinerário que o usuário não vai comprar, contaminando o baseline e
+        podendo disparar alerta com preço irreal. Esses watches ficam a cargo
+        exclusivo da SerpApi (type=3 + multi_city_json).
         """
+        if watch.open_jaw:
+            log.info(
+                "Watch %s (%s): open-jaw (volta de %s) — Travelpayouts não cota "
+                "multi-cidade, coleta fica só com a SerpApi",
+                watch.id, watch.nome, watch.origem_volta_iata,
+            )
+            return []
+
         quotes: list[PriceQuote] = []
         ida_ini, ida_fim = _janela_ida_efetiva(watch)
         consultas = self._consultas_do_watch(watch)

@@ -34,11 +34,23 @@ def montar_mensagem(candidato: Candidato, watch: Watch) -> Mensagem:
     if q.data_volta:
         datas += f" → volta {q.data_volta.strftime('%d/%m/%Y')}"
 
+    # Num open-jaw a volta parte de outra cidade, e escrever só "RIO → NAP"
+    # esconderia metade do itinerário que está sendo cotado.
+    if q.origem_volta and q.origem_volta != q.destino:
+        rota = f"{q.origem} → {q.destino} · volta {q.origem_volta} → {q.origem}"
+    else:
+        rota = f"{q.origem} → {q.destino}"
+
     linhas = [
-        f"✈️ <b>{q.origem} → {q.destino}</b> por <b>{fmt_brl(q.preco)}</b>",
+        f"✈️ <b>{rota}</b> por <b>{fmt_brl(q.preco)}</b>",
         f"📅 {datas}",
         ROTULO_GATILHO.get(candidato.gatilho, candidato.gatilho),
     ]
+    # O preço cotado é sempre por 1 passageiro (ver Watch.passageiros); num
+    # grupo, o número que decide a compra é o total.
+    pessoas = watch.total_passageiros
+    if pessoas > 1:
+        linhas.append(f"👥 {pessoas} passageiros: <b>{fmt_brl(q.preco * pessoas)}</b> no total")
     if watch.preco_limite is not None:
         linhas.append(f"Seu limite: {fmt_brl(watch.preco_limite)}")
     if candidato.baseline_min is not None:

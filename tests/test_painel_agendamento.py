@@ -202,6 +202,28 @@ def test_nome_watch_nao_repete_o_mesmo_dia_e_inclui_a_volta():
     assert "22/05/2027" in nome, "a data de VOLTA precisa entrar no nome"
 
 
+def test_nome_watch_mostra_cidade_de_volta_no_open_jaw():
+    """Itinerário do print do usuário: chega em Nápoles e volta de Veneza.
+    Sem a cidade de retorno o nome afirmaria uma viagem redonda RIO<->NAP,
+    que não é a que está sendo monitorada."""
+    nome = _nome_watch()(
+        "RIO", "NAP", date(2027, 5, 7), date(2027, 5, 7),
+        somente_ida=False, volta_ini=date(2027, 5, 22), volta_fim=None,
+        tipo_data_ida="EXATA", tipo_data_volta="EXATA", origem_volta="VCE",
+    )
+    assert nome == "RIO -> NAP (volta VCE) - 07/05/2027 a 22/05/2027 (ida e volta, datas exatas)"
+    assert len(nome) <= 80, "a coluna Watch.nome é String(80)"
+
+
+def test_nome_watch_omite_cidade_de_volta_quando_e_o_proprio_destino():
+    nome = _nome_watch()(
+        "RIO", "NAP", date(2027, 5, 7), date(2027, 5, 7),
+        somente_ida=False, volta_ini=date(2027, 5, 22), volta_fim=None,
+        tipo_data_ida="EXATA", tipo_data_volta="EXATA", origem_volta="NAP",
+    )
+    assert "(volta NAP)" not in nome
+
+
 def test_nome_watch_janela_de_ida_intervalo():
     nome = _nome_watch()(
         "GRU", "LIS", date(2026, 9, 1), date(2026, 9, 30),
@@ -249,8 +271,17 @@ def _watch_falso(**kw):
         duracao_min=None, duracao_max=None, mes_especifico=None,
         preco_limite=Decimal("3500"), preco_minimo=None,
         preco_aproximado=Decimal("3000"), flexibilidade_dias=None,
+        destino_iata="NAP", origem_volta_iata=None, passageiros=1,
     )
     base.update(kw)
+    # `open_jaw` e `total_passageiros` são properties do ORM que o
+    # SimpleNamespace não deriva sozinho — reproduzidas aqui com a mesma regra
+    # de voofacil/models.py.
+    base.setdefault(
+        "open_jaw",
+        bool(base["origem_volta_iata"]) and base["origem_volta_iata"] != base["destino_iata"],
+    )
+    base.setdefault("total_passageiros", base["passageiros"] or 1)
     return SimpleNamespace(**base)
 
 

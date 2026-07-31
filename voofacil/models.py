@@ -72,6 +72,14 @@ class Watch(Base):
     tipo: Mapped[str] = mapped_column(String(6), default=TipoWatch.ROTA.value)
     origem_iata: Mapped[str] = mapped_column(String(3))
     destino_iata: Mapped[str | None] = mapped_column(String(3))       # NULL quando tipo=REGIAO
+    # Cidade de onde a VOLTA parte, quando ela difere do destino da ida —
+    # itinerário "open-jaw"/multi-cidade (ex.: voa RIO->NAP, roda a Itália por
+    # terra e volta VCE->RIO). NULL = volta sai do próprio destino, que é o
+    # comportamento de todo watch redondo comum. Só a SerpApi consegue cotar
+    # isso (engine google_flights, type=3 + multi_city_json); a API de calendar
+    # da Travelpayouts não tem representação para o caso — ver
+    # `voofacil.providers.travelpayouts.sweep`, que pula esses watches.
+    origem_volta_iata: Mapped[str | None] = mapped_column(String(3))
     regiao_destinos: Mapped[str | None] = mapped_column(Text)         # JSON: ["LIS","MAD",...] p/ REGIAO
     arrival_area_id: Mapped[str | None] = mapped_column(String(40))   # kgmid Google Explore (ex.: /m/02j9z = Europa)
     data_ini: Mapped[date]                                            # janela de embarque
@@ -89,6 +97,13 @@ class Watch(Base):
     preco_minimo: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))   # piso de preço
     preco_aproximado: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))  # preço-alvo informativo
     moeda: Mapped[str] = mapped_column(String(3), default="BRL")
+    # Tamanho do grupo que vai viajar. NÃO entra na busca: as cotações são
+    # sempre por 1 passageiro, e `preco_limite` é comparado com esse preço
+    # individual. Serve para o painel e o alerta mostrarem o custo total do
+    # grupo (preço x passageiros) — buscar com adults=N devolveria apenas
+    # tarifas com N assentos na mesma classe, tipicamente mais caras por pessoa
+    # do que a promoção de 1-2 assentos que interessa detectar.
+    passageiros: Mapped[int] = mapped_column(default=1)
     ativo: Mapped[bool] = mapped_column(Boolean, default=True)
     criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -135,7 +150,31 @@ class Watch(Base):
             "mes_especifico IS NULL OR (mes_especifico BETWEEN 1 AND 12)",
             name="ck_watch_mes_especifico",
         ),
+        # Aceita NULL porque a micro-migração adiciona a coluna nas linhas
+        # pré-existentes do Postgres sem preenchê-las (ver voofacil/db.py); a
+        # leitura trata NULL como 1 pela property `total_passageiros`.
+        CheckConstraint(
+            "passageiros IS NULL OR passageiros >= 1",
+            name="ck_watch_passageiros",
+        ),
+        # Open-jaw só faz sentido em watch de ROTA e com volta: um REGIAO não
+        # tem destino único de onde derivar o trecho de retorno, e um watch de
+        # só-ida não tem retorno nenhum.
+        CheckConstraint(
+            "origem_volta_iata IS NULL OR (tipo = 'ROTA' AND ida_volta = true)",
+            name="ck_watch_origem_volta",
+        ),
     )
+
+    @property
+    def total_passageiros(self) -> int:
+        """Tamanho do grupo, tolerando o NULL das linhas anteriores à coluna."""
+        return self.passageiros or 1
+
+    @property
+    def open_jaw(self) -> bool:
+        """True se a volta parte de uma cidade diferente do destino da ida."""
+        return bool(self.origem_volta_iata) and self.origem_volta_iata != self.destino_iata
 
     @property
     def destinos(self) -> list[str]:

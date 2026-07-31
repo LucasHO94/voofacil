@@ -14,6 +14,10 @@ class PriceQuote(BaseModel):
     destino: str = Field(min_length=3, max_length=3)
     data_ida: date
     data_volta: date | None = None
+    # Cidade de onde o trecho de volta parte, quando difere de `destino`
+    # (itinerário open-jaw). None = volta sai do próprio destino, que é o caso
+    # de toda cotação redonda comum. Ver Watch.origem_volta_iata.
+    origem_volta: str | None = Field(default=None, min_length=3, max_length=3)
     preco: Decimal = Field(gt=0)
     moeda: str = "BRL"
     cia: str | None = None

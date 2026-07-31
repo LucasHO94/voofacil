@@ -70,6 +70,12 @@ def _migrar_colunas_novas() -> None:
             ("mes_especifico", "INTEGER"),
             ("preco_minimo", "NUMERIC(12,2)"),
             ("preco_aproximado", "NUMERIC(12,2)"),
+            # Itinerário open-jaw e tamanho do grupo (ver voofacil/models.py).
+            # Ambas entram sem DEFAULT e sem NOT NULL: as linhas já existentes
+            # em produção ficam com NULL, lido como "volta do próprio destino"
+            # e "1 passageiro" — ver Watch.total_passageiros.
+            ("origem_volta_iata", "VARCHAR(3)"),
+            ("passageiros", "INTEGER"),
         ],
         "horario_agendado": [
             # Modelo catch-up do agendamento (ver voofacil/engine/agendamento.py).

@@ -494,11 +494,30 @@ def job_auto(agora_utc: datetime | None = None) -> None:
             )
 
 
+def _silenciar_log_de_url() -> None:
+    """Impede que a chave da SerpApi apareça nos logs.
+
+    O httpx registra cada requisição em INFO com a URL COMPLETA, e a SerpApi
+    recebe a credencial como query string (`?...&api_key=...`) — não como
+    header. Com `basicConfig(level=INFO)` isso imprime a chave em texto claro
+    em toda varredura. Em produção o worker roda no GitHub Actions de um
+    repositório PÚBLICO: o mascaramento automático de secrets do Actions ajuda,
+    mas depende de casamento exato da string e não é uma garantia sobre a qual
+    valha a pena apostar uma credencial.
+
+    WARNING mantém erros de rede visíveis (que é o que se quer depurar) e
+    descarta a linha de request que carrega a chave.
+    """
+    for nome in ("httpx", "httpcore"):
+        logging.getLogger(nome).setLevel(logging.WARNING)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    _silenciar_log_de_url()
     parser = argparse.ArgumentParser(description="Worker de varredura do VooFacil")
     parser.add_argument("--once", action="store_true",
                         help="executa uma varredura única (Travelpayouts + confirmação) e sai")

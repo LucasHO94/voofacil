@@ -68,8 +68,10 @@ class FakeSerpApi:
         self.explode = explode
         self.chamadas = 0
 
-    def confirmar_google_flights(self, origem, destino, data_ida, data_volta=None):
+    def confirmar_google_flights(self, origem, destino, data_ida, data_volta=None,
+                                 ao_cobrar=None, *, origem_volta=None):
         self.chamadas += 1
+        self.ultima_origem_volta = origem_volta
         if self.explode:
             raise RuntimeError("falha simulada")
         if self.preco_confirmado is None:

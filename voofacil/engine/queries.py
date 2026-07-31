@@ -64,12 +64,33 @@ def criar_watch_rota(
     mes_especifico: int | None = None,
     preco_minimo: Decimal | None = None,
     preco_aproximado: Decimal | None = None,
+    origem_volta: str | None = None,
+    passageiros: int = 1,
 ) -> Watch:
+    """Cria um watch de rota específica.
+
+    `origem_volta` torna o itinerário OPEN-JAW (a volta parte de outra cidade
+    que não o destino); passar a própria cidade de destino é o mesmo que
+    omitir. `passageiros` é o tamanho do grupo — não entra na busca, que é
+    sempre por 1 pessoa, e serve para exibir o custo total (ver
+    Watch.passageiros).
+    """
+    if not ida_volta and origem_volta:
+        raise ValueError("origem_volta exige ida_volta=True — só-ida não tem trecho de retorno")
+    if passageiros < 1:
+        raise ValueError(f"passageiros deve ser >= 1 (recebido {passageiros!r})")
+
+    origem_volta_iata = origem_volta.upper() if origem_volta else None
+    if origem_volta_iata == destino.upper():
+        origem_volta_iata = None      # "volta do próprio destino" = watch redondo comum
+
     w = Watch(
         nome=nome,
         tipo=TipoWatch.ROTA.value,
         origem_iata=origem.upper(),
         destino_iata=destino.upper(),
+        origem_volta_iata=origem_volta_iata,
+        passageiros=passageiros,
         data_ini=data_ini,
         data_fim=data_fim,
         preco_limite=preco_limite,
@@ -106,12 +127,23 @@ def criar_watch_regiao(
     mes_especifico: int | None = None,
     preco_minimo: Decimal | None = None,
     preco_aproximado: Decimal | None = None,
+    passageiros: int = 1,
 ) -> Watch:
+    """Cria um watch de região (origem -> lista de destinos).
+
+    Não aceita `origem_volta`: sem destino único não há de onde derivar o
+    trecho de retorno de um open-jaw (ver a CheckConstraint
+    `ck_watch_origem_volta`).
+    """
+    if passageiros < 1:
+        raise ValueError(f"passageiros deve ser >= 1 (recebido {passageiros!r})")
+
     w = Watch(
         nome=nome,
         tipo=TipoWatch.REGIAO.value,
         origem_iata=origem.upper(),
         destino_iata=None,
+        passageiros=passageiros,
         regiao_destinos=json.dumps([d.upper() for d in destinos]),
         arrival_area_id=arrival_area_id or None,
         data_ini=data_ini,
@@ -169,6 +201,8 @@ def atualizar_watch(
     mes_especifico: int | None | object = MANTER,
     preco_minimo: Decimal | None | object = MANTER,
     preco_aproximado: Decimal | None | object = MANTER,
+    origem_volta: str | None | object = MANTER,
+    passageiros: int | object = MANTER,
     ativo: bool | object = MANTER,
 ) -> Watch | None:
     """Edita um watch existente — contraparte de `criar_watch_rota`/`criar_watch_regiao`.
@@ -212,6 +246,25 @@ def atualizar_watch(
     if novo_ini and novo_fim and novo_ini > novo_fim:
         raise ValueError(f"data_ini ({novo_ini}) não pode ser depois de data_fim ({novo_fim})")
 
+    if passageiros is not MANTER and int(passageiros) < 1:
+        raise ValueError(f"passageiros deve ser >= 1 (recebido {passageiros!r})")
+
+    # Open-jaw precisa continuar coerente DEPOIS da edição, não só antes: quem
+    # troca um watch para só-ida, ou o converte em REGIÃO, sem limpar a origem
+    # da volta violaria a CheckConstraint `ck_watch_origem_volta` — o erro
+    # apareceria lá no commit, como IntegrityError cru na tela do painel.
+    novo_open_jaw = w.origem_volta_iata if origem_volta is MANTER else origem_volta
+    novo_destino = w.destino_iata if destino is MANTER else destino
+    if novo_open_jaw:
+        novo_ida_volta = w.ida_volta if ida_volta is MANTER else ida_volta
+        vira_regiao = destinos is not MANTER
+        if not novo_ida_volta:
+            raise ValueError("origem_volta exige ida_volta=True — só-ida não tem trecho de retorno")
+        if vira_regiao:
+            raise ValueError("origem_volta só existe em watch de ROTA — um watch de REGIÃO não tem destino único")
+        if novo_destino and novo_open_jaw.upper() == novo_destino.upper():
+            novo_open_jaw = None      # volta do próprio destino: watch redondo comum
+
     try:
         if nome is not MANTER:
             w.nome = nome
@@ -227,6 +280,10 @@ def atualizar_watch(
             w.tipo = TipoWatch.REGIAO.value
             w.destino_iata = None
             w.regiao_destinos = json.dumps([d.upper() for d in destinos])
+            w.origem_volta_iata = None    # REGIÃO nunca tem trecho open-jaw
+
+        if origem_volta is not MANTER:
+            w.origem_volta_iata = novo_open_jaw.upper() if novo_open_jaw else None
 
         if arrival_area_id is not MANTER:
             w.arrival_area_id = arrival_area_id or None
@@ -246,6 +303,7 @@ def atualizar_watch(
             ("mes_especifico", mes_especifico),
             ("preco_minimo", preco_minimo),
             ("preco_aproximado", preco_aproximado),
+            ("passageiros", passageiros),
             ("ativo", ativo),
         ):
             if valor is not MANTER:

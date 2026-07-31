@@ -29,6 +29,7 @@ aeroporto expandido.
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
@@ -76,6 +77,26 @@ CIDADES_MULTI_AEROPORTO = {
 
 class SerpApiError(RuntimeError):
     pass
+
+
+def _escalas_do_voo(voo: dict, *, multi_city: bool) -> int | None:
+    """Número de conexões do voo, ou None quando não dá para afirmar.
+
+    O caminho preferido é `layovers`, que a SerpApi já entrega contado. O
+    fallback "número de pernas - 1" só vale para itinerário de um trecho: num
+    `multi_city_json` a lista `flights` concatena os DOIS trechos, e um
+    open-jaw direto nos dois (RIO->NAP + VCE->RIO) sairia como "1 escala" —
+    a emenda entre os trechos contada como conexão. Devolver None nesse caso
+    faz o alerta dizer "escalas não informadas" em vez de um número falso
+    (ver voofacil/alerts/mensagem.py).
+    """
+    layovers = voo.get("layovers")
+    if isinstance(layovers, list):
+        return len(layovers)
+    if multi_city:
+        return None
+    pernas = voo.get("flights") or []
+    return max(len(pernas) - 1, 0)
 
 
 def _ids_busca(codigo: str) -> str:
@@ -274,27 +295,53 @@ class SerpApiProvider:
         data_ida: date,
         data_volta: date | None = None,
         ao_cobrar: Callable[[], None] | None = None,
+        *,
+        origem_volta: str | None = None,
     ) -> PriceQuote | None:
         """Confirma o preço AO VIVO de um itinerário específico (engine=google_flights).
 
         Usado só quando um candidato já cruzou um gatilho no cache da
         Travelpayouts — 1 chamada, não uma varredura.
 
+        `origem_volta` liga o modo MULTI-CIDADE (open-jaw): o retorno parte de
+        outra cidade que não o destino da ida — ex.: voa RIO->NAP, atravessa a
+        Itália por terra, volta VCE->RIO. A SerpApi expressa isso com
+        `type=3` + `multi_city_json` (um objeto por trecho), e nesse modo
+        ignora departure_id/arrival_id/outbound_date/return_date, que por isso
+        não são enviados. Ignorar `origem_volta` e cotar o redondo NAP->RIO
+        devolveria o preço de uma viagem que o usuário não vai comprar.
+
         `ao_cobrar` (opcional) é disparado assim que a chamada HTTP volta 200,
         antes de qualquer parsing — ver `_get`.
         """
+        multi_city = bool(origem_volta) and data_volta is not None
         params = {
             "engine": "google_flights",
-            "departure_id": _ids_busca(origem),
-            "arrival_id": _ids_busca(destino),
-            "outbound_date": data_ida.isoformat(),
-            "type": "1" if data_volta else "2",   # 1=ida-e-volta, 2=só ida
             "currency": settings.moeda_padrao,
             "gl": "br",
             "hl": "pt-br",
         }
-        if data_volta:
-            params["return_date"] = data_volta.isoformat()
+        if multi_city:
+            params["type"] = "3"
+            params["multi_city_json"] = json.dumps([
+                {
+                    "departure_id": _ids_busca(origem),
+                    "arrival_id": _ids_busca(destino),
+                    "date": data_ida.isoformat(),
+                },
+                {
+                    "departure_id": _ids_busca(origem_volta),
+                    "arrival_id": _ids_busca(origem),
+                    "date": data_volta.isoformat(),
+                },
+            ])
+        else:
+            params["departure_id"] = _ids_busca(origem)
+            params["arrival_id"] = _ids_busca(destino)
+            params["outbound_date"] = data_ida.isoformat()
+            params["type"] = "1" if data_volta else "2"   # 1=ida-e-volta, 2=só ida
+            if data_volta:
+                params["return_date"] = data_volta.isoformat()
 
         corpo = self._get(params, ao_cobrar)
         brutos = corpo.get("best_flights") or corpo.get("other_flights") or []
@@ -311,7 +358,6 @@ class SerpApiProvider:
 
         pernas = mais_barato.get("flights") or []
         cia = pernas[0].get("airline") if pernas else None
-        escalas = max(len(pernas) - 1, 0)
         deep_link = corpo.get("search_metadata", {}).get("google_flights_url")
 
         return PriceQuote(
@@ -319,10 +365,11 @@ class SerpApiProvider:
             destino=destino,
             data_ida=data_ida,
             data_volta=data_volta,
+            origem_volta=origem_volta.upper() if origem_volta else None,
             preco=Decimal(str(preco)),
             moeda=settings.moeda_padrao,
             cia=cia,
-            escalas=escalas,
+            escalas=_escalas_do_voo(mais_barato, multi_city=multi_city),
             fonte=self.nome,
             deep_link=deep_link,
         )
@@ -448,6 +495,7 @@ class SerpApiProvider:
                 quote = self.confirmar_google_flights(
                     watch.origem_iata, watch.destino_iata, data_ida, data_volta,
                     ao_cobrar=lambda: registrar_chamada_serpapi(session),
+                    origem_volta=watch.origem_volta_iata if watch.open_jaw else None,
                 )
             except Exception:  # noqa: BLE001 — 1 falha no sweep multi-fonte não derruba a varredura
                 log.exception("Falha no sweep SerpApi (varredura regular) do watch %s", watch.id)

@@ -15,6 +15,9 @@ Critérios cobertos por atende_criterios (todos precisam bater — AND):
 - ida_volta vs "somente ida" (embarque sem desembarque): watch com
   ida_volta=True exige quote com data_volta; watch com ida_volta=False
   exige quote SEM data_volta
+- origem da volta (open-jaw): watch com origem_volta_iata exige que o trecho
+  de retorno parta daquela cidade; watch comum exige retorno do próprio
+  destino
 - preco_minimo — piso de preço (preco_limite é usado em outro lugar, como
   teto para disparar alerta — não é filtro de critério de busca aqui)
 
@@ -108,6 +111,36 @@ def _bate_preco_minimo(watch: Watch, quote: PriceQuote) -> bool:
     return quote.preco >= watch.preco_minimo
 
 
+def _origem_volta_efetiva(valor: str | None, destino: str | None) -> str | None:
+    """Normaliza "de onde a volta parte" para comparação.
+
+    None e "igual ao destino" são a MESMA coisa — as duas formas de dizer
+    "volta redonda" — e precisam colapsar antes do ==, senão um watch comum
+    (origem_volta_iata=None) rejeitaria a cotação de um provider que preencheu
+    origem_volta com o próprio destino.
+    """
+    if valor is None:
+        return None
+    valor = valor.upper()
+    if destino is not None and valor == destino.upper():
+        return None
+    return valor
+
+
+def _bate_open_jaw(watch: Watch, quote: PriceQuote) -> bool:
+    """A volta precisa partir da cidade que o watch pede.
+
+    Sem isto um watch open-jaw (volta de VCE) aceitaria a cotação redonda
+    NAP->RIO que a busca comum devolve, e alertaria com um preço de um
+    itinerário que o usuário não vai comprar.
+    """
+    if quote.data_volta is None:
+        return True  # só-ida não tem trecho de retorno a conferir
+    esperada = _origem_volta_efetiva(watch.origem_volta_iata, watch.destino_iata)
+    obtida = _origem_volta_efetiva(quote.origem_volta, quote.destino)
+    return esperada == obtida
+
+
 def atende_criterios(watch: Watch, quote: PriceQuote) -> bool:
     """True se a cotação satisfaz TODOS os critérios do watch (data ida/volta
     exata|aproximada|intervalo, mês específico, duração min/max, ida_volta vs
@@ -121,6 +154,7 @@ def atende_criterios(watch: Watch, quote: PriceQuote) -> bool:
     """
     return (
         _bate_ida_volta(watch, quote)
+        and _bate_open_jaw(watch, quote)
         and _bate_data_ida(watch, quote)
         and _bate_data_volta(watch, quote)
         and _bate_mes_especifico(watch, quote)

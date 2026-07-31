@@ -55,10 +55,14 @@ from voofacil.engine.agendamento import (  # noqa: E402
     listar_horarios,
 )
 from voofacil.providers.autocomplete import buscar_locais, rotulo_local
-from voofacil.worker import _providers_padrao, executar_varredura
+from voofacil.worker import _providers_padrao, _silenciar_log_de_url, executar_varredura
 from scripts.seed_watch import ARRIVAL_AREA_ID, REGIOES
 
 st.set_page_config(page_title="VooFácil", page_icon="✈️", layout="wide")
+# O botão "Varrer agora" chama a SerpApi daqui, e a chave dela viaja na query
+# string — sem isto o httpx a imprimiria em texto claro no log do Streamlit
+# Cloud a cada varredura manual. Ver _silenciar_log_de_url.
+_silenciar_log_de_url()
 init_db()
 
 
@@ -194,6 +198,7 @@ def _nome_watch(
     volta_fim=None,
     tipo_data_ida: str = "INTERVALO",
     tipo_data_volta: str = "INTERVALO",
+    origem_volta: str | None = None,
 ) -> str:
     """Monta o nome do watch a partir do que foi REALMENTE configurado (D8).
 
@@ -208,6 +213,9 @@ def _nome_watch(
     - o rótulo final descreve ida/volta e a natureza das datas (exatas/aproximada).
 
     Ex.: "RIO -> NAP - 07/05/2027 a 22/05/2027 (ida e volta, datas exatas)".
+    Num itinerário open-jaw a cidade de retorno entra logo após o destino —
+    "RIO -> NAP (volta VCE) - ..." —, senão o nome afirmaria uma viagem
+    redonda que não é a que está sendo monitorada.
     Trunca em 80 caracteres (a coluna `Watch.nome` é String(80)).
     """
     ida_unica = ida_ini == ida_fim
@@ -241,7 +249,11 @@ def _nome_watch(
             elif tipo_data_volta == "APROXIMADA":
                 descritores.append("volta aproximada")
 
-    nome = f"{origem} -> {destino_txt} - {datas_txt} ({', '.join(descritores)})"
+    destino_rotulo = destino_txt
+    if not somente_ida and origem_volta and origem_volta.upper() != destino_txt.upper():
+        destino_rotulo = f"{destino_txt} (volta {origem_volta.upper()})"
+
+    nome = f"{origem} -> {destino_rotulo} - {datas_txt} ({', '.join(descritores)})"
     return nome[:80]
 
 
@@ -294,12 +306,20 @@ def _criterios_watch(watch) -> list[tuple[str, str]]:
         ("Somente ida?", "não — ida e volta" if watch.ida_volta else "sim (sem volta)"),
     ]
     if watch.ida_volta:
+        itens.append((
+            "Volta parte de",
+            f"{watch.origem_volta_iata} (multi-cidade)" if watch.open_jaw
+            else f"{watch.destino_iata or '—'} (mesmo destino)",
+        ))
         itens.append(("Tipo da data de desembarque",
                       _ROTULO_TIPO_DATA_CURTO.get(watch.tipo_data_volta, watch.tipo_data_volta)))
         itens.append(("Janela de desembarque", janela_volta))
         itens.append(("Duração da estadia", dur))
+    pessoas = watch.total_passageiros
     itens.extend([
         ("Mês específico", mes),
+        ("Passageiros",
+         f"{pessoas} (preços cotados por pessoa)" if pessoas > 1 else "1"),
         ("Preço máximo (limite)", fmt_brl(watch.preco_limite) if watch.preco_limite else "—"),
         ("Preço mínimo (piso)", fmt_brl(watch.preco_minimo) if watch.preco_minimo else "—"),
         ("Preço-alvo (aproximado)",
@@ -674,6 +694,21 @@ def aba_watches(session):
         with col_destino:
             destino = _buscador_local("Destino", "destino")
 
+    # ---------- Multi-cidade / open-jaw ----------
+    # Fica FORA do form pelo mesmo motivo do Tipo/Origem/Destino: o checkbox
+    # decide se o buscador aparece, e widgets dentro de um st.form só reagem
+    # no submit. Só existe para ROTA — um watch de REGIÃO não tem destino
+    # único de onde derivar o trecho de volta.
+    origem_volta = None
+    if tipo == "Rota específica":
+        if st.checkbox(
+            "A volta parte de outra cidade (multi-cidade / open-jaw)",
+            help="Ex.: voa Rio → Nápoles, atravessa a Itália por terra e volta "
+                 "de Veneza. Esses monitoramentos são cotados só pela SerpApi — "
+                 "o Travelpayouts não cota multi-cidade.",
+        ):
+            origem_volta = _buscador_local("Cidade de onde a volta parte", "origem_volta")
+
     # ---------- Critérios avançados (opcionais) ----------
     # FORA do st.form: widgets dentro de um form só disparam rerun no submit,
     # então os SELETORES que decidem quais campos aparecem (mesmo padrão já
@@ -738,7 +773,16 @@ def aba_watches(session):
         c1, c2 = st.columns(2)
         data_ini = c1.date_input("Embarque a partir de", value=date.today() + timedelta(days=30))
         data_fim = c2.date_input("Até", value=date.today() + timedelta(days=90))
-        limite_str = st.text_input("Preço máximo em R$ (opcional)", placeholder="3500.00")
+        cl1, cl2 = st.columns([2, 1])
+        limite_str = cl1.text_input(
+            "Preço máximo POR PESSOA em R$ (opcional)", placeholder="3500.00",
+        )
+        passageiros = cl2.number_input(
+            "Passageiros", min_value=1, max_value=9, value=1, step=1,
+            help="As cotações são sempre por 1 pessoa, e o limite acima é "
+                 "comparado com esse preço individual. O grupo serve para o "
+                 "painel e o alerta mostrarem o custo total da viagem.",
+        )
 
         regiao = None
         multidestino_str = ""
@@ -837,10 +881,23 @@ def aba_watches(session):
             # multidestino (D13) sem gravar nome-de-cidade como se fosse código.
             destino_iata = destino.upper() if destino else None
             destinos_custom = None
+            origem_volta_iata = None
             if tipo == "Rota específica":
                 if not destino_iata or len(destino_iata) != 3:
                     st.error("Informe o destino em código IATA (3 letras).")
                     return
+                if origem_volta is not None:
+                    origem_volta_iata = origem_volta.upper() if origem_volta else None
+                    if not origem_volta_iata or len(origem_volta_iata) != 3:
+                        st.error("Informe em código IATA (3 letras) a cidade de onde a volta parte, "
+                                 "ou desmarque a opção de multi-cidade.")
+                        return
+                    if somente_ida:
+                        st.error("Multi-cidade exige ida e volta — um monitoramento somente de ida "
+                                 "não tem trecho de retorno.")
+                        return
+                    if origem_volta_iata == destino_iata:
+                        origem_volta_iata = None   # mesma cidade: é uma volta redonda comum
             elif tipo == "Multidestino personalizado":
                 destinos_custom = [d.strip().upper() for d in multidestino_str.split(",") if d.strip()]
                 if not destinos_custom:
@@ -873,6 +930,7 @@ def aba_watches(session):
                 mes_especifico=mes_especifico,
                 preco_minimo=preco_minimo,
                 preco_aproximado=preco_aproximado,
+                passageiros=int(passageiros),
             )
             nome_comum = dict(
                 somente_ida=somente_ida,
@@ -880,6 +938,7 @@ def aba_watches(session):
                 volta_fim=data_volta_fim_form if not somente_ida else None,
                 tipo_data_ida=tipo_data_ida,
                 tipo_data_volta=tipo_data_volta if not somente_ida else "INTERVALO",
+                origem_volta=origem_volta_iata,
             )
 
             if tipo == "Rota específica":
@@ -887,6 +946,7 @@ def aba_watches(session):
                 resultado = _escrita_protegida(
                     "criar o monitoramento", criar_watch_rota, session, nome,
                     origem, destino_iata, ini_final, fim_final, limite,
+                    origem_volta=origem_volta_iata,
                     **kwargs_avancados,
                 )
             elif tipo == "Região/país (busca ampla)":
@@ -912,7 +972,8 @@ def aba_watches(session):
             # _buscador_local), então clear_on_submit não os alcança — limpa
             # na mão para não reusar sem querer a mesma origem/destino no
             # próximo monitoramento.
-            for k in ("termo_origem", "sel_origem", "termo_destino", "sel_destino"):
+            for k in ("termo_origem", "sel_origem", "termo_destino", "sel_destino",
+                      "termo_origem_volta", "sel_origem_volta"):
                 st.session_state.pop(k, None)
             st.rerun()
 

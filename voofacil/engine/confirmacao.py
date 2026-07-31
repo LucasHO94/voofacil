@@ -116,6 +116,10 @@ def confirmar_candidatos(
             quote_viva = provider.confirmar_google_flights(
                 cand.quote.origem, cand.quote.destino,
                 cand.quote.data_ida, cand.quote.data_volta,
+                # Sem repassar isto, um candidato open-jaw seria reconfirmado
+                # como viagem redonda e o alerta sairia com o preço do
+                # itinerário errado.
+                origem_volta=cand.quote.origem_volta,
             )
             registrar_chamada_serpapi(session)
         except Exception as exc:  # noqa: BLE001 — degrada para "não confirmado", nunca quebra a varredura
