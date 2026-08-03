@@ -39,6 +39,16 @@ import httpx
 
 from voofacil.config import settings
 from voofacil.engine.orcamento import ha_orcamento_serpapi, registrar_chamada_serpapi
+# A janela aceita pela engine, o recorte por mês e o veredito de viabilidade
+# moram em engine/viabilidade.py justamente para que provider, validação de
+# entrada e diagnóstico do painel não possam divergir — quando cada camada
+# tinha a sua cópia, a auditoria achou casos em que o provider fazia (e pagava)
+# uma chamada que a engine depois descartava inteira.
+from voofacil.engine.viabilidade import (
+    janela_aceita as _janela_aceita,
+    motivo_inviavel,
+    recortes_do_mes,
+)
 from voofacil.models import TipoData, TipoWatch, Watch
 from voofacil.schemas import PriceQuote
 
@@ -158,27 +168,6 @@ def _data_alvo(tipo: str | None, ini: date, fim: date | None) -> date:
     return ini + (fim - ini) // 2
 
 
-def _janela_aceita(
-    tipo: str | None, ini: date | None, fim: date | None, flexibilidade_dias: int | None
-) -> tuple[date, date] | None:
-    """Intervalo [lo, hi] de datas que `voofacil.engine.filtros` vai ACEITAR.
-
-    Espelha `_bate_janela_data` da engine: EXATA vira um ponto, APROXIMADA
-    vira ± flexibilidade_dias em torno de `ini`, INTERVALO vira [ini, fim].
-    None = o watch não define essa janela (nada a reconciliar).
-    """
-    if ini is None and fim is None:
-        return None
-    ini = ini if ini is not None else fim
-    if tipo == TipoData.EXATA.value:
-        return ini, ini
-    if tipo == TipoData.APROXIMADA.value:
-        folga = timedelta(days=abs(flexibilidade_dias or 0))
-        return ini - folga, ini + folga
-    hi = fim if fim is not None and fim >= ini else ini
-    return ini, hi
-
-
 def _entre(valor: date, lo: date, hi: date) -> date:
     return min(max(valor, lo), hi)
 
@@ -209,6 +198,17 @@ def _datas_da_busca(watch: Watch) -> tuple[date, date | None] | None:
     )
     if janela_ida is None:
         return None
+    # `mes_especifico` não era reconciliado em lugar nenhum: `_data_alvo`
+    # devolvia o MEIO da janela e, com a janela cruzando dois meses, a única
+    # chamada da varredura cotava sempre o mês errado — a chamada era feita,
+    # COBRADA, e `_bate_mes_especifico` reprovava 100% do resultado, 3x/dia,
+    # para sempre. Recortar a janela no mês pedido não é "chutar" uma data: a
+    # data escolhida continua sendo uma que o watch aceita.
+    if watch.mes_especifico:
+        recortes = recortes_do_mes(janela_ida, watch.mes_especifico)
+        if not recortes:
+            return None       # o mês pedido não tem nenhum dia dentro da janela
+        janela_ida = recortes[0]
     ida_pref = _data_alvo(watch.tipo_data_ida, watch.data_ini, watch.data_fim)
 
     if not watch.ida_volta:
@@ -463,6 +463,19 @@ class SerpApiProvider:
         if watch.tipo != TipoWatch.ROTA.value or not watch.destino_iata:
             return []
         if not self.configurado:
+            return []
+
+        # Antes de qualquer coisa, o veredito de viabilidade — que sabe MAIS que
+        # `_datas_da_busca` (mês específico, piso acima do teto, janela de volta
+        # órfã em watch só-ida). Esses casos deixavam a chamada acontecer e ser
+        # COBRADA para `atende_criterios` reprovar 100% do resultado depois.
+        motivo = motivo_inviavel(watch)
+        if motivo:
+            log.warning(
+                "Watch %s (%s): critérios IMPOSSÍVEIS — %s A chamada SerpApi NÃO foi feita "
+                "(1 das %s chamadas diárias preservada).",
+                watch.id, watch.nome, motivo, settings.serpapi_orcamento_dia,
+            )
             return []
 
         datas = _datas_da_busca(watch)

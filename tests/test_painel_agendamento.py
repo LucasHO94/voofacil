@@ -25,6 +25,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from voofacil.alerts.mensagem import fmt_brl
+from voofacil.engine.viabilidade import (
+    motivo_inviavel_criterios,
+    noites_implicitas_do_watch,
+)
 
 PAINEL_PATH = Path(__file__).resolve().parent.parent / "voofacil" / "app" / "Painel.py"
 
@@ -260,6 +264,7 @@ def _criterios_watch():
         "MESES_PT": _constante("MESES_PT"),
         "_ROTULO_TIPO_DATA_CURTO": _constante("_ROTULO_TIPO_DATA_CURTO"),
         "_fmt_data": _carregar_funcao_isolada("_fmt_data"),
+        "noites_implicitas_do_watch": noites_implicitas_do_watch,
     })
 
 
@@ -296,6 +301,25 @@ def test_criterios_watch_mostra_tudo_com_travessao_quando_vazio():
     assert "22/05/2027" in itens["Janela de desembarque"]
 
 
+def test_criterios_watch_mostra_a_duracao_implicita_pelas_datas():
+    """O expander listava "Janela de desembarque: 22/05/2027" e "Duração da
+    estadia: ..." como dois fatos independentes e igualmente calmos, tendo na
+    mesma tela tudo o que era preciso para gritar a contradição do watch #4."""
+    itens = dict(_criterios_watch()(_watch_falso(duracao_min=14, duracao_max=14)))
+
+    assert itens["Duração da estadia"] == "14 noites (exata)"
+    assert itens["Duração implícita pelas datas"].startswith("15 noites")
+
+
+def test_criterios_watch_denuncia_tolerancia_zero_em_data_aproximada():
+    """A aba dizia "aproximada" + "Flexibilidade: —", o que fazia o usuário
+    acreditar que havia folga; na prática a janela vira um ponto."""
+    itens = dict(_criterios_watch()(
+        _watch_falso(tipo_data_ida="APROXIMADA", flexibilidade_dias=None)
+    ))
+    assert "EXATA" in itens["Flexibilidade (dias)"]
+
+
 def test_criterios_watch_somente_ida_omite_campos_de_volta():
     itens = dict(_criterios_watch()(_watch_falso(ida_volta=False)))
     assert itens["Somente ida?"].startswith("sim")
@@ -326,12 +350,30 @@ def test_selo_saude_vermelho_denuncia_coleta_zerada():
     assert "não está coletando nada" in texto
 
 
+def test_selo_saude_explica_criterios_impossiveis_em_vez_de_contar_snapshots():
+    """"0 snapshots em 7 dias" é a MESMA frase para quatro causas com quatro
+    correções diferentes. Quando a causa é conhecida, ela tem precedência — e
+    aparece no primeiro segundo de vida do watch, não depois de 7 dias."""
+    nivel, texto = _selo_saude()(0, 0, "As datas implicam exatamente 15 noites, mas...")
+    assert nivel == "vermelho"
+    assert "NUNCA vai coletar" in texto
+    assert "15 noites" in texto
+
+
+def test_selo_saude_com_motivo_ignora_ate_coleta_recente():
+    nivel, _ = _selo_saude()(5, 20, "critérios contraditórios")
+    assert nivel == "vermelho"
+
+
 # ==========================================================================
 # D13 — validação de entrada: watches não nascem mais mortos em silêncio
 # ==========================================================================
 
 def _validar_criterios():
-    return _carregar_funcao_isolada("_validar_criterios", {"fmt_brl": fmt_brl})
+    return _carregar_funcao_isolada("_validar_criterios", {
+        "fmt_brl": fmt_brl,
+        "motivo_inviavel_criterios": motivo_inviavel_criterios,
+    })
 
 
 def test_validar_criterios_recusa_data_fim_antes_da_ini():
@@ -366,13 +408,93 @@ def test_validar_criterios_recusa_destino_que_nao_e_iata():
 
 
 def test_validar_criterios_aceita_configuracao_valida():
+    """CORRIGIDO: este teste afirmava que 07/05/2027 -> 22/05/2027 com duração
+    7-14 noites era "configuração válida". Não é — são 15 noites, e o teto de
+    14 torna o watch impossível. Era o teste que CONGELAVA o defeito: os 332
+    casos verdes defendiam ativamente o bug do watch #4, e qualquer correção
+    correta de `_validar_criterios` teria que quebrá-lo.
+
+    A duração agora contém as 15 noites que as datas implicam, e a combinação
+    passa a ser de fato coletável (é o watch irmão #5, que cotou R$ 5.410).
+    """
     assert _validar_criterios()(
         data_ini=date(2027, 5, 7), data_fim=date(2027, 5, 7), somente_ida=False,
         data_volta_ini=date(2027, 5, 22), data_volta_fim=None,
-        duracao_min=7, duracao_max=14,
+        duracao_min=14, duracao_max=16,
         preco_minimo=Decimal("1500"), preco_limite=Decimal("3500"),
         destinos_custom=["LIS", "MAD"],
+        tipo_data_ida="EXATA", tipo_data_volta="EXATA",
     ) is None
+
+
+def test_validar_criterios_aceita_sem_restricao_de_duracao():
+    """Sem duração fixada, o mesmo par de datas exatas é perfeitamente válido —
+    a duração fica determinada pelas próprias datas."""
+    assert _validar_criterios()(
+        data_ini=date(2027, 5, 7), data_fim=date(2027, 5, 7), somente_ida=False,
+        data_volta_ini=date(2027, 5, 22), data_volta_fim=None,
+        tipo_data_ida="EXATA", tipo_data_volta="EXATA",
+    ) is None
+
+
+# --- o caso REAL do watch #4 (medido em produção: 0 snapshots desde sempre) ---
+
+def test_validar_criterios_recusa_o_watch_4_citando_as_15_noites():
+    """RIO -> NAP, embarque EXATO 07/05/2027, desembarque EXATO 22/05/2027,
+    duração 14-14. São 15 noites; o painel aceitava e dizia "Monitoramento
+    criado!". A recusa precisa DIZER o número que as datas implicam, senão o
+    usuário não tem como saber qual dos três campos corrigir."""
+    erro = _validar_criterios()(
+        data_ini=date(2027, 5, 7), data_fim=date(2027, 5, 7), somente_ida=False,
+        data_volta_ini=date(2027, 5, 22), data_volta_fim=None,
+        duracao_min=14, duracao_max=14,
+        tipo_data_ida="EXATA", tipo_data_volta="EXATA",
+    )
+    assert erro
+    assert "15 noites" in erro
+    assert "14 noites" in erro
+
+
+def test_validar_criterios_aceita_o_watch_4_quando_a_ida_e_aproximada():
+    """A contraparte que impede o falso positivo: EXATA e APROXIMADA gravam
+    AMBAS data_ini == data_fim == <data alvo> (a tolerância mora em
+    flexibilidade_dias). Com ±3 dias de folga na ida, 14 noites É alcançável
+    (embarcando em 08/05) — recusar aqui seria trocar falso negativo por falso
+    positivo e passar a barrar watches bons."""
+    assert _validar_criterios()(
+        data_ini=date(2027, 5, 7), data_fim=date(2027, 5, 7), somente_ida=False,
+        data_volta_ini=date(2027, 5, 22), data_volta_fim=None,
+        duracao_min=14, duracao_max=14,
+        tipo_data_ida="APROXIMADA", tipo_data_volta="EXATA", flexibilidade_dias=3,
+    ) is None
+
+
+def test_validar_criterios_recusa_janela_de_volta_antes_da_de_ida():
+    erro = _validar_criterios()(
+        data_ini=date(2027, 5, 7), data_fim=date(2027, 5, 20), somente_ida=False,
+        data_volta_ini=date(2027, 4, 1), data_volta_fim=date(2027, 4, 20),
+    )
+    assert erro and "antes" in erro
+
+
+def test_validar_criterios_recusa_janela_de_volta_em_watch_somente_ida():
+    """A busca sai (e é paga) em modo só-ida, a cotação volta sem retorno e o
+    filtro de desembarque descarta 100% do resultado."""
+    erro = _validar_criterios()(
+        data_ini=date(2027, 5, 7), data_fim=date(2027, 5, 20), somente_ida=True,
+        data_volta_ini=date(2027, 5, 22),
+    )
+    assert erro and "SOMENTE IDA" in erro
+
+
+def test_validar_criterios_recusa_mes_fora_da_janela_de_embarque():
+    """`mes_especifico` não chegava nem a ser parâmetro desta função: a chamada
+    era feita, COBRADA, e depois 100% do resultado era descartado."""
+    erro = _validar_criterios()(
+        data_ini=date(2027, 5, 1), data_fim=date(2027, 5, 30), somente_ida=True,
+        mes_especifico=8,
+    )
+    assert erro and "agosto" in erro
 
 
 # ==========================================================================
@@ -390,6 +512,37 @@ def test_aba_watches_usa_selo_de_saude_e_criterios():
     assert "_criterios_watch" in chamadas
     assert "_form_editar_watch" in chamadas
     assert "Critérios deste monitoramento" in _fonte()
+
+
+def test_aba_watches_explica_o_watch_ja_gravado_que_e_impossivel():
+    """Validar só a ENTRADA não conserta o #4: ele já está no banco e continua
+    coletando zero. A aba precisa recalcular o veredito e mostrar a razão."""
+    aba = _funcao("aba_watches")
+    chamadas = {
+        n.func.id for n in ast.walk(aba)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "motivo_inviavel" in chamadas, "a aba precisa dizer POR QUE o watch não coleta"
+    assert "avisos_do_watch" in chamadas, "faltam os avisos de coleta reduzida"
+    assert "critérios impossíveis" in _fonte()
+    assert "Clique em ✏️ para corrigir" in _fonte(), "a razão precisa vir com o caminho da correção"
+
+
+def test_formulario_deriva_o_default_de_duracao_das_datas_escolhidas():
+    """CAUSA RAIZ da criação do #4: os defaults do bloco "Duração da estadia"
+    eram os literais 7 e 7-14, nunca derivados das datas logo acima. Com ida
+    exata 07/05 e volta exata 22/05, das 180 durações que o widget aceita só 15
+    sobrevive — e os DOIS defaults do formulário estavam entre as 179 letais."""
+    aba = _funcao("aba_watches")
+    chamadas = {
+        n.func.id for n in ast.walk(aba)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "noites_implicitas" in chamadas
+
+    fonte = _fonte()
+    assert 'st.number_input("Noites", min_value=1, max_value=180, value=7' not in fonte
+    assert '"Máximo (noites)", min_value=1, max_value=180, value=14' not in fonte
 
 
 def test_aba_watches_valida_e_protege_a_sessao_na_criacao():

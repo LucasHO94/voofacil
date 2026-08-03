@@ -258,20 +258,25 @@ def test_alertas_do_watch_respeita_limite(session):
 
 
 def test_atualizar_watch_altera_so_o_que_foi_informado(session):
+    # A data de volta usada aqui era 22/05/2027 — 263 noites depois do embarque
+    # de 01/09/2026, contra uma duração de 7-14 noites que o teste MANTINHA. Ou
+    # seja: o próprio teste montava um watch impossível para provar que campos
+    # não informados não mudam. Trocada por uma volta coerente com a duração,
+    # que é o que o teste realmente quer verificar.
     w = criar_watch_rota(session, "antigo", "GRU", "LIS",
                          date(2026, 9, 1), date(2026, 9, 30), Decimal("3500"),
                          duracao_min=7, duracao_max=14)
 
     atualizar_watch(session, w.id, nome="RIO -> NAP", origem="rio", destino="nap",
                     preco_limite=Decimal("3200"), tipo_data_ida="EXATA",
-                    data_volta_ini=date(2027, 5, 22), ativo=False)
+                    data_volta_ini=date(2026, 9, 10), ativo=False)
 
     w = session.get(Watch, w.id)
     assert w.nome == "RIO -> NAP"
     assert (w.origem_iata, w.destino_iata) == ("RIO", "NAP")
     assert w.preco_limite == Decimal("3200")
     assert w.tipo_data_ida == "EXATA"
-    assert w.data_volta_ini == date(2027, 5, 22)
+    assert w.data_volta_ini == date(2026, 9, 10)
     assert w.ativo is False
     # não informados ficam como estavam
     assert (w.duracao_min, w.duracao_max) == (7, 14)

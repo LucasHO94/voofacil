@@ -51,6 +51,7 @@ from decimal import Decimal
 import httpx
 
 from voofacil.config import settings
+from voofacil.engine.viabilidade import motivo_inviavel
 from voofacil.models import TipoData, Watch
 from voofacil.schemas import PriceQuote
 
@@ -401,6 +402,42 @@ class TravelpayoutsProvider:
                 watch.id, watch.nome, watch.origem_volta_iata,
             )
             return []
+
+        # Critérios contraditórios: o sweep não tinha nenhuma checagem de
+        # viabilidade — montava as consultas, fazia as chamadas HTTP e deixava
+        # `atende_criterios` (em worker.py) jogar tudo fora. O log por destino
+        # ainda reportava "N cotações úteis" > 0, o que tornava o diagnóstico
+        # AINDA mais confuso: o log do TP sugeria sucesso e o do worker imprimia
+        # "0 snapshots". Agora a razão sai aqui e o rate limit fica preservado.
+        motivo = motivo_inviavel(watch)
+        if motivo:
+            log.warning(
+                "Watch %s (%s): critérios IMPOSSÍVEIS — %s Nenhuma chamada à "
+                "Travelpayouts foi feita.", watch.id, watch.nome, motivo,
+            )
+            return []
+
+        if not watch.destinos:
+            # Era o único caso invisível até para quem lê o log: o diagnóstico
+            # por destino vive DENTRO do laço, então com a lista vazia o
+            # provider retornava [] em silêncio absoluto.
+            log.warning(
+                "Watch %s (%s): nenhum destino configurado — Travelpayouts não tem o "
+                "que varrer.", watch.id, watch.nome,
+            )
+            return []
+
+        if watch.ida_volta is False:
+            # Medido em 4 rotas: ZERO itens vieram sem `return_at`. Ou seja,
+            # `_bate_ida_volta` (que exige data_volta is None num watch só-ida)
+            # descarta 100% do que sai daqui, DEPOIS do log de "cotações úteis".
+            log.warning(
+                "Watch %s (%s): somente ida — o /v1/prices/calendar SEMPRE devolve "
+                "`return_at` (medido: nenhum item sem volta em 4 rotas), então toda "
+                "cotação da Travelpayouts será descartada pela engine antes de virar "
+                "snapshot. Este monitoramento depende exclusivamente da SerpApi.",
+                watch.id, watch.nome,
+            )
 
         quotes: list[PriceQuote] = []
         ida_ini, ida_fim = _janela_ida_efetiva(watch)

@@ -62,6 +62,7 @@ from voofacil.engine.detector import avaliar_snapshot
 from voofacil.engine.filtros import atende_criterios, atende_criterios_descoberta
 from voofacil.engine.orcamento import ha_orcamento_serpapi, registrar_chamada_serpapi
 from voofacil.engine.store import persistir_quotes
+from voofacil.engine.viabilidade import motivo_inviavel
 from voofacil.models import HorarioAgendado, TipoHorario, TipoWatch, Watch
 from voofacil.providers.base import Provider
 from voofacil.providers.serpapi_google import SerpApiProvider
@@ -197,7 +198,14 @@ def executar_varredura(session, providers: list[Provider]) -> ResultadoVarredura
                 if candidato:
                     resultado.candidatos.append(candidato)
         resultado.snapshots_por_watch[watch.id] = total
-        log.info("Watch %s (%s): %s snapshots", watch.id, watch.nome, total)
+        # "0 snapshots" sozinho é a mesma frase para "a rota não tem oferta",
+        # "a API caiu" e "seus critérios se contradizem". Quando é o terceiro
+        # caso, o log passa a dizer QUAL critério é o culpado.
+        motivo = motivo_inviavel(watch) if total == 0 else None
+        if motivo:
+            log.warning("Watch %s (%s): 0 snapshots — %s", watch.id, watch.nome, motivo)
+        else:
+            log.info("Watch %s (%s): %s snapshots", watch.id, watch.nome, total)
     resultado.candidatos = deduplicar_candidatos(resultado.candidatos)
     return resultado
 

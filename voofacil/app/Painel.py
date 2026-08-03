@@ -42,6 +42,13 @@ from voofacil.engine.queries import (
     historico_precos,
     listar_watches,
 )
+from voofacil.engine.viabilidade import (
+    avisos_do_watch,
+    motivo_inviavel,
+    motivo_inviavel_criterios,
+    noites_implicitas,
+    noites_implicitas_do_watch,
+)
 from voofacil.models import PriceSnapshot, utcnow
 # NOTA: módulo criado por outro agente em paralelo (contrato combinado
 # previamente) — pode não existir ainda neste ambiente enquanto os dois
@@ -299,6 +306,28 @@ def _criterios_watch(watch) -> list[tuple[str, str]]:
 
     mes = MESES_PT[watch.mes_especifico] if watch.mes_especifico else "—"
 
+    # A duração que as DATAS já determinam. O expander listava "Janela de
+    # desembarque: 22/05/2027" e "Duração da estadia: 14 noites (exata)" como
+    # dois fatos independentes e igualmente calmos, tendo na mesma tela tudo o
+    # que era preciso para gritar a contradição (07/05 -> 22/05 são 15 noites).
+    faixa = noites_implicitas_do_watch(watch)
+    if faixa is None:
+        dur_implicita = "—"
+    elif faixa[0] == faixa[1]:
+        dur_implicita = f"{faixa[0]} noites (determinada pelas datas)"
+    else:
+        dur_implicita = f"{faixa[0]} a {faixa[1]} noites (permitido pelas datas)"
+
+    # Tolerância 0 (ou vazia) degrada APROXIMADA para EXATA sem nenhum aviso, e
+    # esta linha continuava exibindo "—", o que fazia o usuário acreditar que
+    # havia folga.
+    if watch.flexibilidade_dias:
+        flex_txt = str(watch.flexibilidade_dias)
+    elif "APROXIMADA" in (watch.tipo_data_ida, watch.tipo_data_volta):
+        flex_txt = "0 — sem folga nenhuma: a data 'aproximada' vale como EXATA"
+    else:
+        flex_txt = "—"
+
     itens = [
         ("Embarque (janela)", embarque),
         ("Tipo da data de embarque",
@@ -315,6 +344,7 @@ def _criterios_watch(watch) -> list[tuple[str, str]]:
                       _ROTULO_TIPO_DATA_CURTO.get(watch.tipo_data_volta, watch.tipo_data_volta)))
         itens.append(("Janela de desembarque", janela_volta))
         itens.append(("Duração da estadia", dur))
+        itens.append(("Duração implícita pelas datas", dur_implicita))
     pessoas = watch.total_passageiros
     itens.extend([
         ("Mês específico", mes),
@@ -324,18 +354,29 @@ def _criterios_watch(watch) -> list[tuple[str, str]]:
         ("Preço mínimo (piso)", fmt_brl(watch.preco_minimo) if watch.preco_minimo else "—"),
         ("Preço-alvo (aproximado)",
          fmt_brl(watch.preco_aproximado) if watch.preco_aproximado else "—"),
-        ("Flexibilidade (dias)",
-         str(watch.flexibilidade_dias) if watch.flexibilidade_dias is not None else "—"),
+        ("Flexibilidade (dias)", flex_txt),
     ])
     return itens
 
 
-def _selo_saude(n_24h: int, n_7d: int) -> tuple[str, str]:
+def _selo_saude(n_24h: int, n_7d: int, motivo_inviavel: str | None = None) -> tuple[str, str]:
     """Traduz a contagem de snapshots recentes num selo (nível, texto) (D8).
 
     É o item de maior valor da aba: com a coleta zerada e o agendamento morto,
     é este selo que denuncia sozinho que o monitoramento não coleta nada há dias.
+
+    `motivo_inviavel` (ver `voofacil.engine.viabilidade`) tem PRECEDÊNCIA sobre
+    a contagem, e por dois motivos. Primeiro porque contar snapshots não
+    distingue "seus critérios se contradizem" de "o robô não rodou", de
+    "orçamento esgotado" e de "a rota não tem cache" — era a mesma frase para
+    quatro causas com quatro correções diferentes. Segundo porque é independente
+    do tempo: aparece no primeiro segundo de vida do watch, e não depois de 7
+    dias de silêncio.
     """
+    if motivo_inviavel:
+        return ("vermelho",
+                "🔴 critérios impossíveis — este monitoramento NUNCA vai coletar nada. "
+                + motivo_inviavel)
     if n_24h > 0:
         return ("verde", f"🟢 coletando — {n_24h} nas últimas 24h · {n_7d} em 7 dias")
     if n_7d > 0:
@@ -356,32 +397,47 @@ def _validar_criterios(
     preco_minimo=None,
     preco_limite=None,
     destinos_custom=None,
+    tipo_data_ida="INTERVALO",
+    tipo_data_volta="INTERVALO",
+    flexibilidade_dias=None,
+    mes_especifico=None,
+    tipo="ROTA",
 ) -> str | None:
     """Valida os critérios ANTES de gravar (D13); devolve a RAZÃO ou None se ok.
 
     Sem isto o painel aceitava, com "Monitoramento criado!", watches que nunca
     produzem nada: data final antes da inicial, duração mínima maior que a máxima,
     piso de preço acima do teto, e destinos digitados por nome (não IATA).
+
+    As regras de VIABILIDADE saíram daqui para `voofacil.engine.viabilidade`:
+    elas precisam ser as mesmas na criação, na edição, na API de queries e no
+    diagnóstico dos watches já gravados. Enquanto moraram só nesta função, ela
+    tinha apenas 5 regras — todas de coerência interna de um MESMO par de
+    campos — e nenhuma cruzava a duração com as janelas de data. Por isso o
+    watch #4 (ida exata 07/05/2027 + volta exata 22/05/2027 = 15 noites, com
+    duração fixada em 14) passava devolvendo None, e o painel respondia
+    "Monitoramento criado!" para um watch que nasceu morto.
+
+    O que continua aqui é só o que é da CAMADA DE ENTRADA: os tipos das datas e
+    a flexibilidade viram parâmetros porque EXATA e APROXIMADA gravam ambas
+    data_ini == data_fim == <data alvo> — sem eles, uma checagem de "noites
+    implícitas" rejeitaria watches APROXIMADA perfeitamente coletáveis.
     """
-    if data_ini and data_fim and data_ini > data_fim:
-        return (f"A data final de embarque ({data_fim:%d/%m/%Y}) está antes da inicial "
-                f"({data_ini:%d/%m/%Y}) — nenhuma data cabe nessa janela, o "
-                "monitoramento nunca cotaria nada.")
-    if (not somente_ida and data_volta_ini and data_volta_fim
-            and data_volta_ini > data_volta_fim):
-        return (f"A data final de desembarque ({data_volta_fim:%d/%m/%Y}) está antes da "
-                f"inicial ({data_volta_ini:%d/%m/%Y}) — janela de volta impossível.")
-    if duracao_min is not None and duracao_max is not None and duracao_min > duracao_max:
-        return (f"A duração mínima ({duracao_min} noites) é maior que a máxima "
-                f"({duracao_max} noites) — nenhuma estadia caberia.")
-    if preco_minimo is not None and preco_limite is not None and preco_minimo > preco_limite:
-        return (f"O preço mínimo ({fmt_brl(preco_minimo)}) é maior que o limite máximo "
-                f"({fmt_brl(preco_limite)}) — nenhum preço poderia disparar alerta.")
     for d in destinos_custom or []:
         if len(d) != 3 or not d.isalpha():
             return (f"Destino inválido: {d!r}. Use códigos IATA de 3 letras (ex.: LIS, "
                     "MAD, CDG). Nomes de cidade não são aceitos no campo multidestino.")
-    return None
+    return motivo_inviavel_criterios(
+        data_ini=data_ini, data_fim=data_fim,
+        tipo_data_ida=tipo_data_ida, tipo_data_volta=tipo_data_volta,
+        flexibilidade_dias=flexibilidade_dias,
+        ida_volta=not somente_ida,
+        data_volta_ini=data_volta_ini, data_volta_fim=data_volta_fim,
+        duracao_min=duracao_min, duracao_max=duracao_max,
+        mes_especifico=mes_especifico,
+        preco_minimo=preco_minimo, preco_limite=preco_limite,
+        tipo=tipo, destinos=destinos_custom,
+    )
 
 
 class _FalhaEscrita:
@@ -494,6 +550,19 @@ def _form_editar_watch(session, w) -> None:
             key=f"edit_dvf_{w.id}",
         )
 
+        # O formulário de edição não rerroda a cada widget (é um st.form), então
+        # esta é a duração implícita pelos valores JÁ SALVOS — que é justamente
+        # a informação que faltava para o usuário perceber a contradição.
+        faixa_salva = noites_implicitas_do_watch(w)
+        if faixa_salva:
+            lo_salvo, hi_salvo = faixa_salva
+            st.caption(
+                f"ℹ️ As datas salvas implicam "
+                + (f"**{lo_salvo} noites**" if lo_salvo == hi_salvo
+                   else f"**de {lo_salvo} a {hi_salvo} noites**")
+                + ". Uma duração fora disso torna o monitoramento impossível — deixe 0/0 "
+                  "para não restringir."
+            )
         cd1, cd2 = st.columns(2)
         dur_min = int(cd1.number_input(
             "Duração mínima (noites, 0 = sem restrição)", min_value=0, max_value=180,
@@ -587,6 +656,10 @@ def _form_editar_watch(session, w) -> None:
         duracao_min=duracao_min, duracao_max=duracao_max,
         preco_minimo=preco_minimo, preco_limite=limite,
         destinos_custom=destinos_custom,
+        tipo_data_ida=tipo_data_ida,
+        tipo_data_volta=tipo_data_volta if not somente_ida else "INTERVALO",
+        flexibilidade_dias=flexibilidade_dias, mes_especifico=mes_especifico,
+        tipo="ROTA" if eh_rota else "REGIAO",
     )
     if erro:
         st.error(erro)
@@ -656,13 +729,21 @@ def aba_watches(session):
                 st.rerun()
 
         # SELO DE SAÚDE (D8): é o que denuncia sozinho coleta zerada/agendamento
-        # morto. Watch pausado não coleta de propósito, então nem entra no selo.
-        if not w.ativo:
+        # morto. Watch pausado não coleta de propósito, então nem entra no selo —
+        # a não ser que também seja IMPOSSÍVEL, aí a razão vale de qualquer jeito.
+        #
+        # O veredito de viabilidade é recalculado a cada rerun porque um watch
+        # GRAVADO ANTES desta correção continua no banco coletando zero: validar
+        # só a entrada não conserta o #4 do usuário.
+        motivo = motivo_inviavel(w)
+        if not w.ativo and not motivo:
             st.caption("⏸️ pausado — não coleta enquanto estiver inativo")
         else:
             n_24h, n_7d = _contagem_snapshots_recentes(session, w.id)
-            nivel, texto = _selo_saude(n_24h, n_7d)
-            if nivel == "vermelho":
+            nivel, texto = _selo_saude(n_24h, n_7d, motivo)
+            if motivo:
+                st.error(f"{texto} Clique em ✏️ para corrigir.")
+            elif nivel == "vermelho":
                 st.error(texto)
             elif nivel == "amarelo":
                 st.warning(texto)
@@ -673,6 +754,12 @@ def aba_watches(session):
         with st.expander("Critérios deste monitoramento"):
             for rotulo, valor in _criterios_watch(w):
                 st.markdown(f"- **{rotulo}:** {valor}")
+            # Combinações legítimas que reduzem muito a coleta (só-ida contra o
+            # cache da Travelpayouts, open-jaw dependente da SerpApi, data exata
+            # contra um cache esparso...). Não bloqueiam nada; existem porque o
+            # sintoma delas é o mesmo "0 snapshots" de todo o resto.
+            for aviso in avisos_do_watch(w):
+                st.warning(aviso, icon="⚠️")
 
         st.divider()
 
@@ -719,7 +806,13 @@ def aba_watches(session):
         st.caption("Deixe como está para o comportamento padrão: qualquer data dentro da "
                    "janela de embarque abaixo, ida e volta, sem piso de preço.")
 
-        somente_ida = st.checkbox("Somente ida (sem volta)")
+        somente_ida = st.checkbox(
+            "Somente ida (sem volta)",
+            help="Atenção: o cache gratuito da Travelpayouts SEMPRE reporta uma data de "
+                 "volta (medido em 4 rotas), então num monitoramento só-ida 100% das "
+                 "cotações dele são descartadas. Numa rota específica sobra a SerpApi; "
+                 "em região/multidestino não sobra fonte nenhuma.",
+        )
 
         st.markdown("**Data de embarque**")
         tipo_data_ida = st.selectbox(
@@ -753,8 +846,16 @@ def aba_watches(session):
 
         st.markdown("**Preço**")
         cp1, cp2 = st.columns(2)
-        minimo_str = cp1.text_input("Preço mínimo em R$ (opcional)", placeholder="1500.00")
-        aprox_str = cp2.text_input("Preço aproximado em R$ (opcional)", placeholder="2800.00")
+        minimo_str = cp1.text_input(
+            "Preço mínimo em R$ — PISO (opcional)", placeholder="1500.00",
+            help="Filtro: toda cotação MAIS BARATA que este valor é descartada e nem "
+                 "entra no histórico. Serve para ignorar tarifas suspeitas de erro. Se a "
+                 "ideia é 'espero pagar por volta disso', use o preço aproximado ao lado.",
+        )
+        aprox_str = cp2.text_input(
+            "Preço aproximado em R$ (opcional)", placeholder="2800.00",
+            help="Só referência: vira uma linha no gráfico, não filtra nada.",
+        )
 
     precisa_flexibilidade = tipo_data_ida == "APROXIMADA" or (
         not somente_ida and tipo_data_volta == "APROXIMADA"
@@ -841,16 +942,47 @@ def aba_watches(session):
                         key="data_volta_fim",
                     )
 
+                # CAUSA RAIZ do watch #4: os defaults deste bloco eram os
+                # literais 7 e 7-14, nunca derivados das datas escolhidas logo
+                # acima. Com ida exata 07/05 e volta exata 22/05, das 180
+                # durações que o widget aceita SÓ 15 sobrevive — e os dois
+                # defaults do próprio formulário estavam entre as 179 letais.
+                # A tolerância (flexibilidade) só aparece mais abaixo no form,
+                # então a faixa calculada aqui é a mais estreita possível; ela
+                # serve de default e de aviso, não de trava (quem recusa de
+                # verdade é _validar_criterios, no submit).
+                faixa = noites_implicitas(
+                    data_ini=data_ida_alvo or data_ini,
+                    data_fim=data_ida_alvo or data_fim,
+                    tipo_data_ida=tipo_data_ida, tipo_data_volta=tipo_data_volta,
+                    data_volta_ini=data_volta_ini_form,
+                    data_volta_fim=data_volta_fim_form,
+                )
+                if faixa:
+                    lo_ok = min(max(faixa[0], 1), 180)
+                    hi_ok = min(max(faixa[1], lo_ok), 180)
+                    st.caption(
+                        "ℹ️ As datas escolhidas acima já implicam "
+                        + (f"**{faixa[0]} noites**" if faixa[0] == faixa[1]
+                           else f"**de {faixa[0]} a {faixa[1]} noites**")
+                        + ". Uma duração fora dessa faixa contradiz as datas e o "
+                          "monitoramento nunca coletaria nada — se não quiser restringir, "
+                          "volte para \"Sem restrição\"."
+                    )
+                else:
+                    lo_ok, hi_ok = 7, 14
+
                 if modo_duracao == "Exata":
-                    dur = st.number_input("Noites", min_value=1, max_value=180, value=7, step=1)
+                    dur = st.number_input("Noites", min_value=1, max_value=180,
+                                          value=lo_ok, step=1)
                     duracao_min = duracao_max = int(dur)
                 elif modo_duracao == "Faixa (mínimo/máximo)":
                     cd1, cd2 = st.columns(2)
                     duracao_min = int(cd1.number_input(
-                        "Mínimo (noites)", min_value=1, max_value=180, value=7, step=1,
+                        "Mínimo (noites)", min_value=1, max_value=180, value=lo_ok, step=1,
                     ))
                     duracao_max = int(cd2.number_input(
-                        "Máximo (noites)", min_value=1, max_value=180, value=14, step=1,
+                        "Máximo (noites)", min_value=1, max_value=180, value=hi_ok, step=1,
                     ))
 
             if precisa_flexibilidade:
@@ -913,6 +1045,10 @@ def aba_watches(session):
                 duracao_min=duracao_min, duracao_max=duracao_max,
                 preco_minimo=preco_minimo, preco_limite=limite,
                 destinos_custom=destinos_custom,
+                tipo_data_ida=tipo_data_ida,
+                tipo_data_volta=tipo_data_volta if not somente_ida else "INTERVALO",
+                flexibilidade_dias=flexibilidade_dias, mes_especifico=mes_especifico,
+                tipo="ROTA" if tipo == "Rota específica" else "REGIAO",
             )
             if erro:
                 st.error(erro)

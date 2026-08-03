@@ -8,6 +8,7 @@ from decimal import Decimal
 
 from sqlalchemy import delete as sa_delete, func, select
 
+from voofacil.engine.viabilidade import motivo_inviavel_criterios
 from voofacil.models import Alerta, PriceSnapshot, TipoData, TipoWatch, Watch, utcnow
 
 # Recorte padrão do histórico. Um watch de REGIÃO gera ~1.600 snapshots por
@@ -27,6 +28,38 @@ class _Manter:
 MANTER = _Manter()
 
 _TIPOS_DATA_VALIDOS = {t.value for t in TipoData}
+
+
+def _validar_dominio(tipo_data_ida, tipo_data_volta, mes_especifico) -> None:
+    """Valores fora do domínio das colunas.
+
+    As CheckConstraints do modelo também barram isso, mas só no commit e com um
+    IntegrityError cru na tela do painel. Estas checagens existiam apenas em
+    `atualizar_watch`: as funções de CRIAÇÃO validavam menos do que a de edição,
+    então dava para gravar pela porta da criação um watch que a própria API
+    depois se recusava a editar.
+    """
+    for rotulo, valor in (("tipo_data_ida", tipo_data_ida), ("tipo_data_volta", tipo_data_volta)):
+        if valor is not MANTER and valor not in _TIPOS_DATA_VALIDOS:
+            raise ValueError(f"{rotulo} inválido: {valor!r} (use {sorted(_TIPOS_DATA_VALIDOS)})")
+    if mes_especifico is not MANTER and mes_especifico is not None:
+        if not 1 <= int(mes_especifico) <= 12:
+            raise ValueError(f"mes_especifico deve estar entre 1 e 12 (recebido {mes_especifico!r})")
+
+
+def _recusar_se_inviavel(**criterios) -> None:
+    """Levanta ValueError com a RAZÃO quando os critérios se contradizem.
+
+    A validação morava só no painel (`_validar_criterios`), ou seja, na camada
+    de APRESENTAÇÃO: qualquer outro caminho — scripts/seed_watch.py, fixtures,
+    correções manuais, agentes — gravava watches impossíveis sem uma linha de
+    aviso, e por isso a regressão do watch #4 não tinha onde ser travada de
+    forma durável. Agora quem decide é a engine (voofacil/engine/viabilidade.py)
+    e o painel apenas TRADUZ a exceção em st.error.
+    """
+    erro = motivo_inviavel_criterios(**criterios)
+    if erro:
+        raise ValueError(erro)
 
 
 def _commit_seguro(session) -> None:
@@ -74,11 +107,27 @@ def criar_watch_rota(
     omitir. `passageiros` é o tamanho do grupo — não entra na busca, que é
     sempre por 1 pessoa, e serve para exibir o custo total (ver
     Watch.passageiros).
+
+    Levanta ValueError (com a razão em português) quando os critérios se
+    contradizem — ver `voofacil.engine.viabilidade`.
     """
     if not ida_volta and origem_volta:
         raise ValueError("origem_volta exige ida_volta=True — só-ida não tem trecho de retorno")
     if passageiros < 1:
         raise ValueError(f"passageiros deve ser >= 1 (recebido {passageiros!r})")
+    if not destino:
+        raise ValueError("um watch de ROTA precisa de destino")
+    _validar_dominio(tipo_data_ida, tipo_data_volta, mes_especifico)
+    _recusar_se_inviavel(
+        data_ini=data_ini, data_fim=data_fim,
+        tipo_data_ida=tipo_data_ida, tipo_data_volta=tipo_data_volta,
+        flexibilidade_dias=flexibilidade_dias, ida_volta=ida_volta,
+        data_volta_ini=data_volta_ini, data_volta_fim=data_volta_fim,
+        duracao_min=duracao_min, duracao_max=duracao_max,
+        mes_especifico=mes_especifico,
+        preco_minimo=preco_minimo, preco_limite=preco_limite,
+        tipo=TipoWatch.ROTA.value, destinos=[destino],
+    )
 
     origem_volta_iata = origem_volta.upper() if origem_volta else None
     if origem_volta_iata == destino.upper():
@@ -134,9 +183,25 @@ def criar_watch_regiao(
     Não aceita `origem_volta`: sem destino único não há de onde derivar o
     trecho de retorno de um open-jaw (ver a CheckConstraint
     `ck_watch_origem_volta`).
+
+    Levanta ValueError (com a razão em português) quando os critérios se
+    contradizem — ver `voofacil.engine.viabilidade`.
     """
     if passageiros < 1:
         raise ValueError(f"passageiros deve ser >= 1 (recebido {passageiros!r})")
+    if not destinos:
+        raise ValueError("um watch de REGIÃO precisa de ao menos um destino")
+    _validar_dominio(tipo_data_ida, tipo_data_volta, mes_especifico)
+    _recusar_se_inviavel(
+        data_ini=data_ini, data_fim=data_fim,
+        tipo_data_ida=tipo_data_ida, tipo_data_volta=tipo_data_volta,
+        flexibilidade_dias=flexibilidade_dias, ida_volta=ida_volta,
+        data_volta_ini=data_volta_ini, data_volta_fim=data_volta_fim,
+        duracao_min=duracao_min, duracao_max=duracao_max,
+        mes_especifico=mes_especifico,
+        preco_minimo=preco_minimo, preco_limite=preco_limite,
+        tipo=TipoWatch.REGIAO.value, destinos=list(destinos),
+    )
 
     w = Watch(
         nome=nome,
@@ -220,7 +285,9 @@ def atualizar_watch(
     Retorna o Watch atualizado, ou None se `watch_id` não existir (mesma
     tolerância de `excluir_watch` — o painel pode ter um id velho na tela).
     Valida ANTES de gravar e faz rollback em caso de falha, para nunca deixar a
-    Session do Streamlit envenenada com PendingRollbackError.
+    Session do Streamlit envenenada com PendingRollbackError. A validação
+    considera o estado RESULTANTE (valor novo mesclado com o que está no
+    banco), não só os campos informados — ver `_recusar_se_inviavel` abaixo.
     """
     w = session.get(Watch, watch_id)
     if w is None:
@@ -230,12 +297,7 @@ def atualizar_watch(
         raise ValueError("informe 'destino' (ROTA) ou 'destinos' (REGIÃO), não os dois")
 
     # --- validações antes de encostar no objeto -----------------------------
-    for rotulo, valor in (("tipo_data_ida", tipo_data_ida), ("tipo_data_volta", tipo_data_volta)):
-        if valor is not MANTER and valor not in _TIPOS_DATA_VALIDOS:
-            raise ValueError(f"{rotulo} inválido: {valor!r} (use {sorted(_TIPOS_DATA_VALIDOS)})")
-    if mes_especifico is not MANTER and mes_especifico is not None:
-        if not 1 <= int(mes_especifico) <= 12:
-            raise ValueError(f"mes_especifico deve estar entre 1 e 12 (recebido {mes_especifico!r})")
+    _validar_dominio(tipo_data_ida, tipo_data_volta, mes_especifico)
     if destino is not MANTER and not destino:
         raise ValueError("um watch de ROTA precisa de destino")
     if destinos is not MANTER and not destinos:
@@ -264,6 +326,38 @@ def atualizar_watch(
             raise ValueError("origem_volta só existe em watch de ROTA — um watch de REGIÃO não tem destino único")
         if novo_destino and novo_open_jaw.upper() == novo_destino.upper():
             novo_open_jaw = None      # volta do próprio destino: watch redondo comum
+
+    # A edição PARCIAL precisa cruzar o valor NOVO com o que já está no banco.
+    # Só data_ini/data_fim tinham esse cuidado: `atualizar_watch(id,
+    # duracao_min=14)` num watch saudável de datas exatas o transformava em
+    # impossível, retornava normalmente e o painel escrevia "Monitoramento
+    # atualizado!" — a partir da varredura seguinte ele coletava zero, em
+    # silêncio. Agora o estado RESULTANTE inteiro é conferido antes do commit.
+    def _resultante(valor, atual):
+        return atual if valor is MANTER else valor
+
+    if destino is not MANTER:
+        novo_tipo, novos_destinos = TipoWatch.ROTA.value, [destino]
+    elif destinos is not MANTER:
+        novo_tipo, novos_destinos = TipoWatch.REGIAO.value, list(destinos)
+    else:
+        novo_tipo, novos_destinos = w.tipo, w.destinos
+
+    _recusar_se_inviavel(
+        data_ini=novo_ini, data_fim=novo_fim,
+        tipo_data_ida=_resultante(tipo_data_ida, w.tipo_data_ida),
+        tipo_data_volta=_resultante(tipo_data_volta, w.tipo_data_volta),
+        flexibilidade_dias=_resultante(flexibilidade_dias, w.flexibilidade_dias),
+        ida_volta=_resultante(ida_volta, w.ida_volta),
+        data_volta_ini=_resultante(data_volta_ini, w.data_volta_ini),
+        data_volta_fim=_resultante(data_volta_fim, w.data_volta_fim),
+        duracao_min=_resultante(duracao_min, w.duracao_min),
+        duracao_max=_resultante(duracao_max, w.duracao_max),
+        mes_especifico=_resultante(mes_especifico, w.mes_especifico),
+        preco_minimo=_resultante(preco_minimo, w.preco_minimo),
+        preco_limite=_resultante(preco_limite, w.preco_limite),
+        tipo=novo_tipo, destinos=novos_destinos,
+    )
 
     try:
         if nome is not MANTER:
