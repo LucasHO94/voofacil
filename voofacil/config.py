@@ -1,10 +1,42 @@
 """Configuração central do VooFacil — tudo vem do .env (nunca hardcode de segredo)."""
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Raiz do projeto (pasta que contém voofacil/)
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def _normalizar_url_postgres(url: str) -> str:
+    """Reescreve o scheme do Postgres para o dialeto que o projeto realmente tem.
+
+    O Neon (e o Heroku, e a maioria dos painéis) oferece a connection string como
+    `postgres://...` ou `postgresql://...`. O SQLAlchemy 2.0 mapeia AMBOS para o
+    driver `psycopg2`, que NÃO está instalado — o requirements.txt só traz o
+    `psycopg` v3, cujo dialeto é `postgresql+psycopg://`. Copiar a URL crua do Neon
+    para o secret, então, fazia `create_engine` estourar `ModuleNotFoundError:
+    psycopg2` no worker: `job_varredura` capturava, dava rollback e devolvia False,
+    o horário nunca era carimbado e a automação parecia morta. Reescrever o prefixo
+    aqui torna as três formas equivalentes e à prova desse erro de configuração.
+    """
+    for cru, dialeto in (("postgresql://", "postgresql+psycopg://"),
+                         ("postgres://", "postgresql+psycopg://")):
+        if url.startswith(cru):
+            return dialeto + url[len(cru):]
+    return url
+
+
+def descricao_banco(url: str) -> str:
+    """`esquema://host/banco` — sem usuário nem senha, seguro para log.
+
+    Existe para o worker anunciar no arranque CONTRA QUAL banco vai rodar: é o
+    sinal que separa "está gravando no Neon" de "caiu no SQLite efêmero do
+    runner" num relance do log do GitHub Actions."""
+    if url.startswith("sqlite"):
+        return "SQLite (arquivo local — efêmero no runner do GitHub Actions)"
+    u = urlparse(url)
+    return f"{u.scheme}://{u.hostname or '?'}/{(u.path or '').lstrip('/') or '?'}"
 
 
 class Settings(BaseSettings):
@@ -74,7 +106,7 @@ class Settings(BaseSettings):
     @property
     def sqlalchemy_url(self) -> str:
         if self.database_url:
-            return self.database_url
+            return _normalizar_url_postgres(self.database_url)
         data_dir = BASE_DIR / "data"
         data_dir.mkdir(exist_ok=True)
         return f"sqlite:///{data_dir / 'voofacil.db'}"

@@ -43,13 +43,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 
 from voofacil.alerts.dispatcher import canais_padrao, despachar
-from voofacil.config import settings
+from voofacil.config import descricao_banco, settings
 from voofacil.db import SessionLocal, init_db
 from voofacil.engine.agendamento import (
     garantir_horarios_padrao,
@@ -502,6 +503,32 @@ def job_auto(agora_utc: datetime | None = None) -> None:
             )
 
 
+def _abortar_se_sqlite_no_actions() -> None:
+    """Falha RÁPIDO e RUIDOSO quando o worker roda na nuvem sem banco de verdade.
+
+    O pior modo de falha do projeto era SILENCIOSO: se o secret `DATABASE_URL`
+    não existisse (ou viesse vazio) no GitHub Actions, `settings.sqlalchemy_url`
+    caía num SQLite dentro do runner. O worker rodava "verde", criava as tabelas,
+    semeava os horários PADRÃO, varria, carimbava `ultima_execucao` — tudo NESSE
+    SQLite, que é destruído no fim do job. O Neon (que o painel lê) nunca era
+    tocado, então os horários que o usuário cadastrou na aba Agendamento ficavam
+    com "⏳ ainda não rodou" para sempre, sem um único sinal de erro.
+
+    `GITHUB_ACTIONS=true` é injetado automaticamente em todo runner do Actions —
+    é o jeito confiável de saber "estou na nuvem, aqui SQLite é sempre engano".
+    Localmente (dev, --once, testes) a variável não existe e o SQLite continua
+    sendo o padrão legítimo, então este guard não atrapalha.
+    """
+    if os.environ.get("GITHUB_ACTIONS") == "true" and settings.sqlalchemy_url.startswith("sqlite"):
+        log.error(
+            "DATABASE_URL ausente/vazio no GitHub Actions: o worker cairia num "
+            "SQLite EFÊMERO do runner e o Neon (que o painel lê) nunca receberia "
+            "nada — nenhum horário da aba Agendamento rodaria. Configure o secret "
+            "DATABASE_URL em Settings > Secrets and variables > Actions e rode de novo."
+        )
+        raise SystemExit(1)
+
+
 def _silenciar_log_de_url() -> None:
     """Impede que a chave da SerpApi apareça nos logs.
 
@@ -526,6 +553,10 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     _silenciar_log_de_url()
+    # Anuncia o alvo LOGO no começo do log: é o primeiro lugar onde se vê, num
+    # relance, se o worker está de fato ligado no Neon ou caiu no SQLite efêmero.
+    log.info("Banco alvo: %s", descricao_banco(settings.sqlalchemy_url))
+    _abortar_se_sqlite_no_actions()
     parser = argparse.ArgumentParser(description="Worker de varredura do VooFacil")
     parser.add_argument("--once", action="store_true",
                         help="executa uma varredura única (Travelpayouts + confirmação) e sai")
