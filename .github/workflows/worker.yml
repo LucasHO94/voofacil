@@ -29,20 +29,22 @@ name: VooFacil Worker (varredura periodica)
 # horario dispara no maximo uma vez por dia (a ocorrencia mais recente), nunca
 # acumula execucoes atrasadas.
 #
-# POR QUE DOIS CRONS: sao cinto e suspensorio, e agora mais disparo so
-# significa MENOS LATENCIA na recuperacao (nunca execucao em dobro).
-#   - '*/15 * * * *' : alta frequencia. A maioria eh descartada, mas o que
-#     passa recupera rapido.
-#   - '37 * * * *'   : uma vez por hora, em minuto NAO redondo. Cron horario
-#     em minuto quebrado eh entregue com muito mais confiabilidade que */15 -
-#     minuto redondo eh justamente onde a fila do Actions fica congestionada.
-#     Este eh o piso: garante recuperacao em ~1h no pior caso.
-# O bloco "concurrency" abaixo impede sobreposicao se os dois coincidirem.
+# POR QUE DOIS CRONS HORARIOS (e nao mais '*/15'): sao cinto e suspensorio.
+#   - '13 * * * *' e '37 * * * *' : uma vez por hora cada, em minutos QUEBRADOS
+#     e distantes (24 min). Cron em minuto quebrado eh entregue com muito mais
+#     confiabilidade que '*/15' (minuto redondo eh onde a fila do Actions
+#     congestiona), e dois disparos/hora quase nunca coincidem -> o bloco
+#     "concurrency" abaixo raramente precisa cancelar. Era o '*/15' que, alem de
+#     ser descartado ~95% pelo GitHub, empilhava disparos atrasados que o
+#     concurrency entao cancelava, gerando a enxurrada de e-mail "Run failed:
+#     All jobs were cancelled" (cancelado != quebrado; era so barulho).
+#   - Com o modelo catch-up a frequencia so afeta LATENCIA (recuperacao em ~30
+#     min no pior caso), nunca a corretude, e nunca ha execucao em dobro.
 # O repo eh publico, entao minutos de Actions sao ilimitados (sem custo).
 on:
   schedule:
-    - cron: '*/15 * * * *'      # poll rapido (entrega ruim, mas quando entrega recupera rapido)
-    - cron: '37 * * * *'        # piso horario em minuto quebrado (entrega mais confiavel)
+    - cron: '13 * * * *'        # poll horario em minuto quebrado
+    - cron: '37 * * * *'        # segundo poll horario, distante do primeiro
   workflow_dispatch:            # botao "Run workflow" para disparo manual/teste
 
 # Evita duas rodadas simultaneas se uma demorar
@@ -83,3 +85,18 @@ jobs:
           ALERT_EMAIL_TO:   ${{ secrets.SMTP_USER }}
           PYTHONPATH:       .
         run: python -m voofacil.worker --auto
+
+      # Diagnostico que aparece na aba "Summary" do run (nao dispara e-mail).
+      # Mostra CONTRA QUAL banco o worker rodou (host/banco, sem credencial) e o
+      # estado dos horarios: e o jeito de confirmar, num relance, se o worker
+      # esta ligado no MESMO Neon que o painel le ou se caiu no SQLite efemero.
+      # 'if: always()' roda mesmo que a varredura falhe; '|| true' nunca quebra o job.
+      - name: Diagnostico do agendamento (resumo do run)
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PYTHONPATH:   .
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          python -m scripts.diagnostico_agendamento >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
